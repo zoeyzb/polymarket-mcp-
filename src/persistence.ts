@@ -245,6 +245,74 @@ export async function persistSportsEvents(events: SportsFeedEvent[]) {
   return { configured: true, inserted: rowCount ?? 0 };
 }
 
+export async function compactRealtimeQuotes(minutesBack = 180) {
+  if (!pool) return { configured: false, reason: "not_configured", barsUpserted: 0 };
+
+  const boundedMinutes = Math.max(2, Math.min(1440, minutesBack));
+  const { rowCount } = await pool.query(
+    `with raw as (
+       select
+         token_id,
+         date_trunc('minute', observed_at) as minute,
+         observed_at,
+         case
+           when best_bid is not null and best_ask is not null
+           then (best_bid + best_ask) / 2.0
+           else coalesce(last_trade_price, best_bid, best_ask)
+         end as mid,
+         spread
+       from polymarket_brain.realtime_quotes
+       where observed_at >= now() - ($1 || ' minutes')::interval
+     ),
+     grouped as (
+       select
+         token_id,
+         minute,
+         (array_agg(mid order by observed_at asc) filter (where mid is not null))[1] as open_mid,
+         max(mid) as high_mid,
+         min(mid) as low_mid,
+         (array_agg(mid order by observed_at desc) filter (where mid is not null))[1] as close_mid,
+         avg(spread) filter (where spread is not null) as avg_spread,
+         min(spread) filter (where spread is not null) as min_spread,
+         max(spread) filter (where spread is not null) as max_spread,
+         count(*)::int as sample_count,
+         min(observed_at) as first_observed_at,
+         max(observed_at) as last_observed_at
+       from raw
+       group by token_id, minute
+     )
+     insert into polymarket_brain.quote_bars_1m (
+       token_id, minute, open_mid, high_mid, low_mid, close_mid,
+       avg_spread, min_spread, max_spread, sample_count,
+       first_observed_at, last_observed_at, updated_at
+     )
+     select
+       token_id, minute, open_mid, high_mid, low_mid, close_mid,
+       avg_spread, min_spread, max_spread, sample_count,
+       first_observed_at, last_observed_at, now()
+     from grouped
+     on conflict (token_id, minute) do update set
+       open_mid = excluded.open_mid,
+       high_mid = excluded.high_mid,
+       low_mid = excluded.low_mid,
+       close_mid = excluded.close_mid,
+       avg_spread = excluded.avg_spread,
+       min_spread = excluded.min_spread,
+       max_spread = excluded.max_spread,
+       sample_count = excluded.sample_count,
+       first_observed_at = excluded.first_observed_at,
+       last_observed_at = excluded.last_observed_at,
+       updated_at = now()`,
+    [boundedMinutes]
+  );
+
+  return {
+    configured: true,
+    minutesBack: boundedMinutes,
+    barsUpserted: rowCount ?? 0
+  };
+}
+
 export async function getStreamPersistenceStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
@@ -253,7 +321,9 @@ export async function getStreamPersistenceStats() {
       (select count(*)::int from polymarket_brain.realtime_quotes) as "realtimeQuoteRows",
       (select max(observed_at) from polymarket_brain.realtime_quotes) as "lastRealtimeQuoteAt",
       (select count(*)::int from polymarket_brain.sports_events) as "sportsEventRows",
-      (select max(received_at) from polymarket_brain.sports_events) as "lastSportsEventAt"
+      (select max(received_at) from polymarket_brain.sports_events) as "lastSportsEventAt",
+      (select count(*)::int from polymarket_brain.quote_bars_1m) as "quoteBarRows",
+      (select max(minute) from polymarket_brain.quote_bars_1m) as "lastQuoteBarMinute"
   `);
 
   const row = rows[0] || {};
@@ -266,6 +336,10 @@ export async function getStreamPersistenceStats() {
     sportsEventRows: Number(row.sportsEventRows || 0),
     lastSportsEventAt: row.lastSportsEventAt
       ? new Date(row.lastSportsEventAt).toISOString()
+      : null,
+    quoteBarRows: Number(row.quoteBarRows || 0),
+    lastQuoteBarMinute: row.lastQuoteBarMinute
+      ? new Date(row.lastQuoteBarMinute).toISOString()
       : null
   };
 }
