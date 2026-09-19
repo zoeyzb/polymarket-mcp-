@@ -2,6 +2,7 @@ import type { GammaMarket, NormalizedBook, OrderBook, OrderLevel } from "./types
 
 const GAMMA_BASE = process.env.GAMMA_API_BASE || "https://gamma-api.polymarket.com";
 const CLOB_BASE = process.env.CLOB_API_BASE || "https://clob.polymarket.com";
+const DATA_BASE = process.env.DATA_API_BASE || "https://data-api.polymarket.com";
 const DEFAULT_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 10000);
 
 async function fetchJson<T>(
@@ -216,6 +217,16 @@ export async function getOrderBooks(tokenIds: string[]): Promise<Map<string, Nor
   }
 
   return out;
+}
+
+export async function getRecentTrades(conditionId: string, limit = 100): Promise<unknown[]> {
+  const params = new URLSearchParams({
+    market: conditionId,
+    limit: String(Math.min(500, Math.max(1, limit))),
+    offset: "0"
+  });
+  const payload = await fetchJson<unknown>(`${DATA_BASE}/trades?${params}`);
+  return Array.isArray(payload) ? payload : [];
 }
 
 export async function getPriceHistory(tokenId: string, hours = 6, fidelityMinutes = 1): Promise<unknown> {
