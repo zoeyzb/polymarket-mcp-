@@ -70,6 +70,58 @@ describe("political structural-only policy", () => {
   });
 });
 
+describe("NegRisk basket audit", () => {
+  const baseScan = (): ScanResult => ({
+    generatedAt: new Date().toISOString(),
+    maxMinutes: 120,
+    totalActiveMarketsScanned: 3,
+    totalInWindowBeforeFilters: 3,
+    returned: 0,
+    candidates: [],
+    eventBaskets: []
+  });
+
+  it("rejects automatic NegRisk baskets without authoritative child-set verification", () => {
+    const scan = baseScan();
+    scan.eventBaskets = [{
+      eventId: "event-1",
+      eventTitle: "Who wins?",
+      marketCount: 3,
+      marketIds: ["1", "2", "3"],
+      outcomeQuestions: ["A", "B", "Other"],
+      yesTokenIds: ["a", "b", "c"],
+      executable: [],
+      bestNetProfitUsd: 0,
+      bestNetRoiPct: null,
+      bestBudgetUsd: null,
+      flags: ["neg_risk_complete_outcome_set"]
+    }];
+
+    const finding = auditScanResult(scan).find(x => x.id === "negrisk_child_set_verification");
+    expect(finding?.ok).toBe(false);
+  });
+
+  it("accepts Gamma-verified NegRisk child sets", () => {
+    const scan = baseScan();
+    scan.eventBaskets = [{
+      eventId: "event-1",
+      eventTitle: "Who wins?",
+      marketCount: 3,
+      marketIds: ["1", "2", "3"],
+      outcomeQuestions: ["A", "B", "Other"],
+      yesTokenIds: ["a", "b", "c"],
+      executable: [],
+      bestNetProfitUsd: 0,
+      bestNetRoiPct: null,
+      bestBudgetUsd: null,
+      flags: ["neg_risk_complete_outcome_set", "gamma_event_child_set_verified"]
+    }];
+
+    const finding = auditScanResult(scan).find(x => x.id === "negrisk_child_set_verification");
+    expect(finding?.ok).toBe(true);
+  });
+});
+
 describe("historical calibration domain classification", () => {
   it("classifies sports markets", () => {
     expect(classifyHistoricalDomain({
