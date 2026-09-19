@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { parseNumberArray, parseStringArray } from "./polymarket.js";
 import { calculateCompleteSetExecution } from "./scanner.js";
-import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
+import {
+  analyzePriceHistoryPayload,
+  analyzeTradeFlowPayload,
+  calculateCompleteOutcomeBasket
+} from "./intelligence.js";
 import type { NormalizedBook } from "./types.js";
 
 function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
@@ -112,5 +116,32 @@ describe("price regime analysis", () => {
     });
     expect(analysis.regime).toBe("stable");
     expect(analysis.anomalyScore).toBeLessThan(20);
+  });
+});
+
+
+describe("trade flow analysis", () => {
+  it("detects concentrated buy-side flow", () => {
+    const now = 2_000_000_000_000;
+    const analysis = analyzeTradeFlowPayload([
+      { price: 0.6, size: 1000, side: "BUY", timestamp: (now - 60_000) / 1000 },
+      { price: 0.61, size: 500, side: "BUY", timestamp: (now - 120_000) / 1000 },
+      { price: 0.59, size: 50, side: "SELL", timestamp: (now - 180_000) / 1000 }
+    ], now);
+
+    expect(analysis.buyUsd).toBeGreaterThan(800);
+    expect(analysis.signedImbalance).toBeGreaterThan(0.8);
+    expect(analysis.recent5mUsd).toBeGreaterThan(800);
+    expect(analysis.flowScore).toBeGreaterThan(50);
+  });
+
+  it("does not fabricate flow when trades are malformed", () => {
+    const analysis = analyzeTradeFlowPayload([
+      { price: 2, size: 10, side: "BUY" },
+      { price: 0.5, size: 0, side: "SELL" }
+    ]);
+    expect(analysis.trades).toBe(0);
+    expect(analysis.totalUsd).toBe(0);
+    expect(analysis.signedImbalance).toBe(0);
   });
 });
