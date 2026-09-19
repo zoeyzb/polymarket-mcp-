@@ -34,7 +34,7 @@ import { getExternalCryptoEvidence } from "./external-evidence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
