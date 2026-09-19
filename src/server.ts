@@ -17,7 +17,7 @@ import {
   searchActiveMarkets,
   upstreamCheck
 } from "./polymarket.js";
-import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
+import { scanBinaryArbitrage, scanClosingSoon, scanMultiHorizon, scanOpportunities } from "./scanner.js";
 import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
