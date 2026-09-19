@@ -6,6 +6,7 @@ import {
   analyzeTradeFlowPayload,
   calculateCompleteOutcomeBasket
 } from "./intelligence.js";
+import { inferFinalResolution } from "./resolutions.js";
 import type { NormalizedBook } from "./types.js";
 
 function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
@@ -143,5 +144,33 @@ describe("trade flow analysis", () => {
     expect(analysis.trades).toBe(0);
     expect(analysis.totalUsd).toBe(0);
     expect(analysis.signedImbalance).toBe(0);
+  });
+});
+
+
+describe("final resolution inference", () => {
+  it("records only decisive closed-market outcomes", () => {
+    const result = inferFinalResolution({
+      closed: true,
+      outcomes: '["Yes","No"]',
+      outcomePrices: '["1","0"]',
+      clobTokenIds: '["yes-token","no-token"]'
+    });
+    expect(result?.winningOutcome).toBe("Yes");
+    expect(result?.winningTokenId).toBe("yes-token");
+  });
+
+  it("rejects open or non-final price states", () => {
+    expect(inferFinalResolution({
+      closed: false,
+      outcomes: '["Yes","No"]',
+      outcomePrices: '["1","0"]'
+    })).toBeNull();
+
+    expect(inferFinalResolution({
+      closed: true,
+      outcomes: '["Yes","No"]',
+      outcomePrices: '["0.98","0.02"]'
+    })).toBeNull();
   });
 });
