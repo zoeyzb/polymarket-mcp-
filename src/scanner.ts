@@ -564,6 +564,38 @@ async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
   }
 }
 
+function finalizeDiscoveryScores(candidates: ScanCandidate[]) {
+  for (const candidate of candidates) {
+    const attention = candidate.attentionScore ?? candidate.opportunityScore;
+    candidate.discoveryScore =
+      candidate.opportunityClass === "executable_structural"
+        ? candidate.opportunityScore
+        : candidate.opportunityClass === "top_book_structural_only"
+          ? round(Math.max(candidate.opportunityScore, attention * 0.85), 1)
+          : round(Math.max(candidate.opportunityScore, attention), 1);
+  }
+}
+
+function opportunityClassRank(value: OpportunityClass) {
+  return value === "executable_structural" ? 3 :
+    value === "top_book_structural_only" ? 2 : 1;
+}
+
+function compareDiscovery(a: ScanCandidate, b: ScanCandidate) {
+  const classDelta = opportunityClassRank(b.opportunityClass) - opportunityClassRank(a.opportunityClass);
+  if (classDelta !== 0) return classDelta;
+
+  if (a.opportunityClass === "executable_structural" || b.opportunityClass === "executable_structural") {
+    return b.opportunityScore - a.opportunityScore ||
+      (b.discoveryScore ?? 0) - (a.discoveryScore ?? 0) ||
+      a.minutesRemaining - b.minutesRemaining;
+  }
+
+  return (b.discoveryScore ?? b.opportunityScore) - (a.discoveryScore ?? a.opportunityScore) ||
+    b.opportunityScore - a.opportunityScore ||
+    a.minutesRemaining - b.minutesRemaining;
+}
+
 export async function scanClosingSoon(options?: {
   maxMinutes?: number;
   minLiquidity?: number;
@@ -609,12 +641,10 @@ export async function scanClosingSoon(options?: {
     await enrichHistoricalEvidence(enriched);
   }
 
+  finalizeDiscoveryScores(enriched);
+
   if (sort === "opportunity") {
-    enriched.sort((a, b) =>
-      b.opportunityScore - a.opportunityScore ||
-      (b.attentionScore ?? 0) - (a.attentionScore ?? 0) ||
-      a.minutesRemaining - b.minutesRemaining
-    );
+    enriched.sort(compareDiscovery);
   } else if (sort === "review_score") {
     enriched.sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || a.minutesRemaining - b.minutesRemaining);
   } else if (sort === "liquidity") {
@@ -672,7 +702,7 @@ export async function scanOpportunities(options?: {
   });
 
   const candidates = scan.candidates
-    .filter(c => c.opportunityScore >= minOpportunityScore)
+    .filter(c => (c.discoveryScore ?? c.opportunityScore) >= minOpportunityScore)
     .slice(0, Math.min(200, Math.max(1, options?.limit ?? 50)));
 
   return {
