@@ -34,12 +34,15 @@ import {
   getPersistentStats,
   getRecentAlerts,
   getResolutionStats,
+  getRealtimeTargets,
+  getRealtimeTargetStats,
   getStreamPersistenceStats,
   getUnresolvedObservedMarkets,
   persistAlertsFromScan,
   persistRealtimeQuotes,
   persistScan,
   persistSportsEvents,
+  replaceRealtimeTargets,
   persistenceConfig,
   recordResolution,
   testPersistenceConnection,
@@ -54,6 +57,21 @@ import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.4.0";
+type ServiceRole = "all" | "api" | "scanner" | "streams" | "history" | "maintenance";
+const SERVICE_ROLE: ServiceRole = (
+  ["all", "api", "scanner", "streams", "history", "maintenance"].includes(
+    String(process.env.SERVICE_ROLE || "all").toLowerCase()
+  )
+    ? String(process.env.SERVICE_ROLE || "all").toLowerCase()
+    : "all"
+) as ServiceRole;
+
+const ROLE_API = SERVICE_ROLE === "all" || SERVICE_ROLE === "api";
+const ROLE_SCANNER = SERVICE_ROLE === "all" || SERVICE_ROLE === "scanner";
+const ROLE_STREAMS = SERVICE_ROLE === "all" || SERVICE_ROLE === "streams";
+const ROLE_HISTORY = SERVICE_ROLE === "all" || SERVICE_ROLE === "history";
+const ROLE_MAINTENANCE = SERVICE_ROLE === "all" || SERVICE_ROLE === "maintenance";
+
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
@@ -659,6 +677,9 @@ export function createMcpServer() {
       streams: await getStreamPersistenceStats().catch(error => ({
         error: errorMessage(error)
       })),
+      realtimeTargets: await getRealtimeTargetStats().catch(error => ({
+        error: errorMessage(error)
+      })),
       maintenance: await getMaintenanceStats().catch(error => ({
         error: errorMessage(error)
       }))
@@ -733,6 +754,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       service: "zoey-polymarket-mcp",
       version: VERSION,
       mode: "read-only",
+    serviceRole: SERVICE_ROLE,
       maxScannerWindowMinutes: 120,
       now: new Date().toISOString()
     });
@@ -800,6 +822,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
       stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) })),
       streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) })),
+      realtimeTargets: await getRealtimeTargetStats().catch(error => ({ error: errorMessage(error) })),
       maintenance: await getMaintenanceStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
@@ -1055,7 +1078,15 @@ async function runBackgroundScan() {
     for (const basket of multi.structuralUniverse.eventBaskets) {
       for (const tokenId of basket.yesTokenIds) tokens.add(tokenId);
     }
-    realtimeTracker.updateTokens([...tokens]);
+    await replaceRealtimeTargets(
+      [...tokens],
+      "multi_horizon_scanner",
+      Math.max(180, BACKGROUND_SCAN_SECONDS * 3)
+    );
+
+    if (ROLE_STREAMS) {
+      realtimeTracker.updateTokens([...tokens]);
+    }
 
     console.log(JSON.stringify({
       level: "info",
@@ -1079,6 +1110,26 @@ async function runBackgroundScan() {
     }));
   } finally {
     backgroundScanRunning = false;
+  }
+}
+
+let realtimeTargetRefreshRunning = false;
+
+async function runRealtimeTargetRefresh() {
+  if (realtimeTargetRefreshRunning) return;
+  realtimeTargetRefreshRunning = true;
+  try {
+    const targets = await getRealtimeTargets();
+    realtimeTracker.updateTokens(targets);
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "realtime_target_refresh_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    realtimeTargetRefreshRunning = false;
   }
 }
 
@@ -1306,42 +1357,57 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       at: new Date().toISOString()
     })));
 
-  sportsTracker.start();
+  if (ROLE_STREAMS) {
+    sportsTracker.start();
 
-  runStreamPersistenceWorker().catch(() => {});
-  setInterval(() => {
+    runRealtimeTargetRefresh().catch(() => {});
+    setInterval(() => {
+      runRealtimeTargetRefresh().catch(() => {});
+    }, 10_000).unref();
+
     runStreamPersistenceWorker().catch(() => {});
-  }, STREAM_PERSIST_SECONDS * 1000).unref();
+    setInterval(() => {
+      runStreamPersistenceWorker().catch(() => {});
+    }, STREAM_PERSIST_SECONDS * 1000).unref();
 
-  runQuoteCompactionWorker().catch(() => {});
-  setInterval(() => {
     runQuoteCompactionWorker().catch(() => {});
-  }, QUOTE_COMPACTION_SECONDS * 1000).unref();
+    setInterval(() => {
+      runQuoteCompactionWorker().catch(() => {});
+    }, QUOTE_COMPACTION_SECONDS * 1000).unref();
+  }
 
-  runBackgroundScan().catch(() => {});
-  setInterval(() => {
+  if (ROLE_SCANNER) {
     runBackgroundScan().catch(() => {});
-  }, BACKGROUND_SCAN_SECONDS * 1000).unref();
+    setInterval(() => {
+      runBackgroundScan().catch(() => {});
+    }, BACKGROUND_SCAN_SECONDS * 1000).unref();
+  }
 
-  runResolutionWorker().catch(() => {});
-  setInterval(() => {
+  if (ROLE_HISTORY) {
     runResolutionWorker().catch(() => {});
-  }, RESOLUTION_CHECK_SECONDS * 1000).unref();
+    setInterval(() => {
+      runResolutionWorker().catch(() => {});
+    }, RESOLUTION_CHECK_SECONDS * 1000).unref();
 
-  runHistoricalBackfillWorker().catch(() => {});
-  setInterval(() => {
     runHistoricalBackfillWorker().catch(() => {});
-  }, HISTORICAL_BACKFILL_SECONDS * 1000).unref();
+    setInterval(() => {
+      runHistoricalBackfillWorker().catch(() => {});
+    }, HISTORICAL_BACKFILL_SECONDS * 1000).unref();
+  }
 
-  runMaintenanceWorker().catch(() => {});
-  setInterval(() => {
+  if (ROLE_MAINTENANCE) {
     runMaintenanceWorker().catch(() => {});
-  }, MAINTENANCE_SECONDS * 1000).unref();
+    setInterval(() => {
+      runMaintenanceWorker().catch(() => {});
+    }, MAINTENANCE_SECONDS * 1000).unref();
+  }
 });
 
 function shutdown(signal: string) {
-  realtimeTracker.close();
-  sportsTracker.close();
+  if (ROLE_STREAMS) {
+    realtimeTracker.close();
+    sportsTracker.close();
+  }
   console.log(JSON.stringify({ level: "info", message: "shutdown", signal }));
   httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
