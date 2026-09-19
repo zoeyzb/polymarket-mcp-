@@ -4,9 +4,12 @@ import {
   parseNumberArray,
   parseStringArray
 } from "./polymarket.js";
+import { calculateCompleteOutcomeBasket } from "./intelligence.js";
+import { recordSnapshot } from "./snapshots.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
+  EventBasketOpportunity,
   GammaMarket,
   NormalizedBook,
   OpportunityClass,
@@ -209,6 +212,98 @@ function scoreCandidate(
   };
 }
 
+function eventMeta(market: GammaMarket): { id: string; title: string | null; negRisk: boolean } | null {
+  const event = Array.isArray(market.events) && market.events.length
+    ? market.events[0] as Record<string, unknown>
+    : null;
+  if (!event) return null;
+  const id = event.id ?? event.slug;
+  if (id === undefined || id === null || String(id).length === 0) return null;
+  return {
+    id: String(id),
+    title: event.title ? String(event.title) : null,
+    negRisk: market.negRisk === true || event.negRisk === true
+  };
+}
+
+function yesTokenId(market: GammaMarket): string | null {
+  const outcomes = parseStringArray(market.outcomes);
+  const tokenIds = parseStringArray(market.clobTokenIds);
+  const yesIndex = outcomes.findIndex(outcome => outcome.trim().toLowerCase() === "yes");
+  return yesIndex >= 0 && tokenIds[yesIndex] ? tokenIds[yesIndex] : null;
+}
+
+function buildEventBasketOpportunities(
+  allActive: GammaMarket[],
+  now: number,
+  cutoff: number,
+  allBooks: Map<string, NormalizedBook>,
+  bufferBps: number
+): EventBasketOpportunity[] {
+  const groups = new Map<string, { title: string | null; negRisk: boolean; markets: GammaMarket[] }>();
+
+  for (const market of allActive) {
+    const meta = eventMeta(market);
+    if (!meta) continue;
+    const current = groups.get(meta.id) ?? { title: meta.title, negRisk: meta.negRisk, markets: [] };
+    current.negRisk = current.negRisk || meta.negRisk;
+    if (!current.title && meta.title) current.title = meta.title;
+    current.markets.push(market);
+    groups.set(meta.id, current);
+  }
+
+  const results: EventBasketOpportunity[] = [];
+  for (const [eventId, group] of groups) {
+    if (!group.negRisk || group.markets.length < 3) continue;
+
+    const completeWindow = group.markets.every(market => {
+      const end = getEndDate(market);
+      if (!end) return false;
+      const ts = Date.parse(end);
+      return ts >= now && ts <= cutoff && market.active !== false && market.closed !== true && market.acceptingOrders !== false;
+    });
+    if (!completeWindow) continue;
+
+    const yesTokens = group.markets.map(yesTokenId);
+    if (yesTokens.some((token): token is null => token === null)) continue;
+    const tokenIds = yesTokens as string[];
+    const books = tokenIds.map(token => allBooks.get(token)).filter((book): book is NormalizedBook => Boolean(book));
+    if (books.length !== tokenIds.length) continue;
+
+    const topAskTotal = books.reduce((sum, book) => sum + (book.bestAsk ?? 1), 0);
+    const executable = BUDGETS.map(budget => calculateCompleteOutcomeBasket(books, budget, bufferBps));
+    const positive = executable
+      .filter(x => x.fillComplete && x.netProfitUsd > 0 && (x.netRoiPct ?? 0) > 0)
+      .sort((a, b) => b.netProfitUsd - a.netProfitUsd || (b.netRoiPct ?? 0) - (a.netRoiPct ?? 0));
+
+    if (topAskTotal >= 1 && positive.length === 0) continue;
+
+    const best = positive[0] ?? null;
+    results.push({
+      eventId,
+      eventTitle: group.title,
+      marketCount: group.markets.length,
+      marketIds: group.markets.map(market => String(market.id ?? market.conditionId ?? market.slug ?? "")),
+      outcomeQuestions: group.markets.map(market => String(market.question ?? "Untitled market")),
+      yesTokenIds: tokenIds,
+      executable,
+      bestNetProfitUsd: best?.netProfitUsd ?? 0,
+      bestNetRoiPct: best?.netRoiPct ?? null,
+      bestBudgetUsd: best?.budgetUsd ?? null,
+      flags: [
+        "neg_risk_complete_outcome_set",
+        ...(topAskTotal < 1 ? ["top_book_complete_set_edge"] : []),
+        ...(best ? ["depth_buffer_verified_event_basket"] : ["top_book_only_not_depth_verified"])
+      ]
+    });
+  }
+
+  return results.sort((a, b) =>
+    b.bestNetProfitUsd - a.bestNetProfitUsd ||
+    (b.bestNetRoiPct ?? 0) - (a.bestNetRoiPct ?? 0)
+  );
+}
+
 function classifyOpportunity(
   tradabilityScore: number,
   topAskTotal: number | null,
@@ -385,15 +480,34 @@ export async function scanClosingSoon(options?: {
     enriched.sort((a, b) => a.minutesRemaining - b.minutesRemaining);
   }
 
+  const eventBaskets = includeOrderBooks
+    ? buildEventBasketOpportunities(all, now, cutoff, allBooks, bufferBps)
+    : [];
+
   const sliced = enriched.slice(offset, offset + limit);
+  const scanDurationMs = Date.now() - started;
+
+  recordSnapshot({
+    at: new Date().toISOString(),
+    totalActiveMarkets: all.length,
+    totalInWindow: inWindow.length,
+    scanDurationMs,
+    candidateCount: enriched.length,
+    executableCount:
+      enriched.filter(candidate => candidate.opportunityClass === "executable_structural").length +
+      eventBaskets.filter(basket => basket.bestNetProfitUsd > 0).length,
+    topOpportunityScore: enriched[0]?.opportunityScore ?? null
+  });
+
   return {
     generatedAt: new Date(now).toISOString(),
     maxMinutes,
     totalActiveMarketsScanned: all.length,
     totalInWindowBeforeFilters: inWindow.length,
     returned: sliced.length,
-    scanDurationMs: Date.now() - started,
-    candidates: sliced
+    scanDurationMs,
+    candidates: sliced,
+    eventBaskets
   };
 }
 
