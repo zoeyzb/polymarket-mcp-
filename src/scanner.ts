@@ -14,6 +14,7 @@ import {
 import { recordSnapshot } from "./snapshots.js";
 import { getHistoricalCandidateStats } from "./persistence.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
+import { isPoliticalCandidate, isPoliticalMarket } from "./domain-policy.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -437,13 +438,17 @@ async function enrichMarket(
     opportunityScore: opportunity.opportunityScore,
     rapidReviewScore: scoring.score,
     scoreBreakdown: scoring.breakdown,
-    flags: scoring.flags
+    flags: [
+      ...scoring.flags,
+      ...(isPoliticalMarket(market) ? ["political_structural_only"] : [])
+    ]
   };
 }
 
 async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
   const limit = Math.max(0, Math.min(200, Number(process.env.SIGNAL_ENRICH_LIMIT || 100)));
   const targets = [...candidates]
+    .filter(candidate => !isPoliticalCandidate(candidate))
     .sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || b.liquidityUsd - a.liquidityUsd)
     .slice(0, limit);
 
@@ -500,7 +505,9 @@ async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
 }
 
 async function enrichExternalEvidence(candidates: ScanCandidate[]) {
-  const targets = candidates.slice(0, Math.max(0, Math.min(100, Number(process.env.EXTERNAL_EVIDENCE_LIMIT || 50))));
+  const targets = candidates
+    .filter(candidate => !isPoliticalCandidate(candidate))
+    .slice(0, Math.max(0, Math.min(100, Number(process.env.EXTERNAL_EVIDENCE_LIMIT || 50))));
   const queue = [...targets];
   const concurrency = Math.max(1, Math.min(10, Number(process.env.EXTERNAL_EVIDENCE_CONCURRENCY || 4)));
 
@@ -552,10 +559,12 @@ async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
       persistenceBoost: round(persistenceBoost, 2)
     };
 
-    candidate.attentionScore = round(
-      Math.min(100, (candidate.attentionScore ?? candidate.opportunityScore) + persistenceBoost),
-      1
-    );
+    if (!isPoliticalCandidate(candidate)) {
+      candidate.attentionScore = round(
+        Math.min(100, (candidate.attentionScore ?? candidate.opportunityScore) + persistenceBoost),
+        1
+      );
+    }
 
     if (stats.observations >= 2) candidate.flags.push("repeated_market_observation");
     if (candidate.opportunityClass === "executable_structural" && stats.executableObservations >= 1) {
@@ -566,6 +575,12 @@ async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
 
 function finalizeDiscoveryScores(candidates: ScanCandidate[]) {
   for (const candidate of candidates) {
+    if (isPoliticalCandidate(candidate)) {
+      candidate.attentionScore = candidate.opportunityScore;
+      candidate.discoveryScore = candidate.opportunityScore;
+      continue;
+    }
+
     const attention = candidate.attentionScore ?? candidate.opportunityScore;
     candidate.discoveryScore =
       candidate.opportunityClass === "executable_structural"
