@@ -45,8 +45,16 @@ export function parseNumberArray(value: unknown): number[] {
   return parseStringArray(value).map(Number).filter(Number.isFinite);
 }
 
-export async function listAllActiveMarkets(maxPages = 40, pageSize = 500): Promise<GammaMarket[]> {
-  const output: GammaMarket[] = [];
+let activeMarketCache: { at: number; markets: GammaMarket[] } | null = null;
+const ACTIVE_CACHE_MS = Math.max(0, Number(process.env.ACTIVE_MARKET_CACHE_MS || 15000));
+
+export async function listAllActiveMarkets(maxPages = 250, pageSize = 100): Promise<GammaMarket[]> {
+  if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
+    return activeMarketCache.markets;
+  }
+
+  const byKey = new Map<string, GammaMarket>();
+
   for (let page = 0; page < maxPages; page++) {
     const offset = page * pageSize;
     const params = new URLSearchParams({
@@ -55,12 +63,21 @@ export async function listAllActiveMarkets(maxPages = 40, pageSize = 500): Promi
       limit: String(pageSize),
       offset: String(offset)
     });
+
     const batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
     if (!Array.isArray(batch) || batch.length === 0) break;
-    output.push(...batch);
+
+    for (const market of batch) {
+      const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
+      byKey.set(key, market);
+    }
+
     if (batch.length < pageSize) break;
   }
-  return output;
+
+  const markets = [...byKey.values()];
+  activeMarketCache = { at: Date.now(), markets };
+  return markets;
 }
 
 export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
