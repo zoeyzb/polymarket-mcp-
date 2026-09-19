@@ -22,11 +22,13 @@ import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteO
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
 import {
+  cleanupRawStreams,
   compactRealtimeQuotes,
   getAlertStats,
   getCalibrationStats,
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
+  getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
   getPersistentStats,
@@ -639,6 +641,9 @@ export function createMcpServer() {
       })),
       streams: await getStreamPersistenceStats().catch(error => ({
         error: errorMessage(error)
+      })),
+      maintenance: await getMaintenanceStats().catch(error => ({
+        error: errorMessage(error)
       }))
     })
   );
@@ -777,7 +782,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       config: persistenceConfig(),
       connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
       stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) })),
-      streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) }))
+      streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) })),
+      maintenance: await getMaintenanceStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
   }
@@ -941,6 +947,7 @@ let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
 let quoteCompactionRunning = false;
 let historicalBackfillRunning = false;
+let maintenanceRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
@@ -948,6 +955,9 @@ const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTIO
 const HISTORICAL_BACKFILL_SECONDS = Math.max(300, Number(process.env.HISTORICAL_BACKFILL_SECONDS || 900));
 const HISTORICAL_LOOKBACK_HOURS = Math.max(6, Math.min(168, Number(process.env.HISTORICAL_LOOKBACK_HOURS || 48)));
 const HISTORICAL_BACKFILL_LIMIT = Math.max(1, Math.min(100, Number(process.env.HISTORICAL_BACKFILL_LIMIT || 40)));
+const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
+const RAW_QUOTE_RETENTION_HOURS = Math.max(24, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 72));
+const SPORTS_EVENT_RETENTION_DAYS = Math.max(7, Number(process.env.SPORTS_EVENT_RETENTION_DAYS || 30));
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -1055,6 +1065,32 @@ async function runQuoteCompactionWorker() {
     }));
   } finally {
     quoteCompactionRunning = false;
+  }
+}
+
+async function runMaintenanceWorker() {
+  if (maintenanceRunning) return;
+  maintenanceRunning = true;
+  try {
+    const result = await cleanupRawStreams(
+      RAW_QUOTE_RETENTION_HOURS,
+      SPORTS_EVENT_RETENTION_DAYS
+    );
+    console.log(JSON.stringify({
+      level: "info",
+      message: "raw_stream_cleanup",
+      ...result,
+      at: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "raw_stream_cleanup_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    maintenanceRunning = false;
   }
 }
 
@@ -1224,6 +1260,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   setInterval(() => {
     runHistoricalBackfillWorker().catch(() => {});
   }, HISTORICAL_BACKFILL_SECONDS * 1000).unref();
+
+  runMaintenanceWorker().catch(() => {});
+  setInterval(() => {
+    runMaintenanceWorker().catch(() => {});
+  }, MAINTENANCE_SECONDS * 1000).unref();
 });
 
 function shutdown(signal: string) {
