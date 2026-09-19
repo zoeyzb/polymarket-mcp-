@@ -176,11 +176,14 @@ async function runSystemAudit() {
   });
 
   const recentInterval = Number(integrity.recentAvgIntervalSeconds);
+  const expectedScanSeconds = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
+  const cadenceMin = expectedScanSeconds * 0.5;
+  const cadenceMax = expectedScanSeconds * 1.75;
   findings.push({
     id: "recent_scan_cadence",
-    ok: !Number.isFinite(recentInterval) || (recentInterval >= 20 && recentInterval <= 45),
+    ok: !Number.isFinite(recentInterval) || (recentInterval >= cadenceMin && recentInterval <= cadenceMax),
     severity: "warning",
-    detail: `recentAvgIntervalSeconds=${integrity.recentAvgIntervalSeconds ?? "unknown"}`
+    detail: `recentAvgIntervalSeconds=${integrity.recentAvgIntervalSeconds ?? "unknown"}, expectedSeconds=${expectedScanSeconds}`
   });
 
   const mcpSelfTest = await runMcpSelfTest();
