@@ -93,6 +93,16 @@ export function auditScanResult(scan: ScanResult): AuditFinding[] {
     `violations=${politicalViolations.length}`
   );
 
+  const unverifiedNegRiskBaskets = (scan.eventBaskets || []).filter(
+    basket => !basket.flags.includes("gamma_event_child_set_verified")
+  );
+  push(
+    "negrisk_child_set_verification",
+    unverifiedNegRiskBaskets.length === 0,
+    "critical",
+    `violations=${unverifiedNegRiskBaskets.length}`
+  );
+
   const augmentedFlags = (scan.eventBaskets || []).filter(basket =>
     basket.flags.some(flag => /augmented/i.test(flag))
   );
