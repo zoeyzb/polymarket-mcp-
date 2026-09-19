@@ -198,6 +198,10 @@ class MarketRealtimeTracker {
     return this.quotes.get(tokenId) ?? null;
   }
 
+  getQuotes() {
+    return [...this.quotes.values()].map(quote => ({ ...quote }));
+  }
+
   getHealth() {
     const state =
       this.tokens.size === 0 ? "idle" :
