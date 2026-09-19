@@ -26,8 +26,11 @@ import {
   getPersistenceIntegrity,
   getPersistentStats,
   getResolutionStats,
+  getStreamPersistenceStats,
   getUnresolvedObservedMarkets,
+  persistRealtimeQuotes,
   persistScan,
+  persistSportsEvents,
   persistenceConfig,
   recordResolution,
   testPersistenceConnection
@@ -185,7 +188,40 @@ async function runSystemAudit() {
     detail: `state=${sports.state}, cachedEvents=${sports.cachedEvents}, lastError=${sports.lastError ?? "none"}`
   });
 
+  const streamPersistence = await getStreamPersistenceStats().catch(error => ({
+    configured: true,
+    error: errorMessage(error),
+    realtimeQuoteRows: 0,
+    lastRealtimeQuoteAt: null,
+    sportsEventRows: 0,
+    lastSportsEventAt: null
+  })) as any;
+
+  if (sports.sportResultCount > 0) {
+    const sportsAgeSeconds = streamPersistence.lastSportsEventAt
+      ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastSportsEventAt)) / 1000)
+      : Infinity;
+    findings.push({
+      id: "sports_event_persistence",
+      ok: sportsAgeSeconds <= 120,
+      severity: "warning",
+      detail: `rows=${streamPersistence.sportsEventRows}, ageSeconds=${Number.isFinite(sportsAgeSeconds) ? sportsAgeSeconds.toFixed(2) : "missing"}`
+    });
+  }
+
   const realtime = realtimeTracker.getHealth();
+
+  if (realtime.subscribedTokens > 0 && realtime.cachedQuotes > 0) {
+    const quoteAgeSeconds = streamPersistence.lastRealtimeQuoteAt
+      ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastRealtimeQuoteAt)) / 1000)
+      : Infinity;
+    findings.push({
+      id: "realtime_quote_persistence",
+      ok: quoteAgeSeconds <= 30,
+      severity: "critical",
+      detail: `rows=${streamPersistence.realtimeQuoteRows}, ageSeconds=${Number.isFinite(quoteAgeSeconds) ? quoteAgeSeconds.toFixed(2) : "missing"}`
+    });
+  }
   const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
   const realtimeConsistent =
     expectedTokens === 0
@@ -209,6 +245,7 @@ async function runSystemAudit() {
       scanDurationMs: scan.scanDurationMs
     },
     persistence: integrity,
+    streamPersistence,
     realtime,
     sports
   };
@@ -568,6 +605,9 @@ export function createMcpServer() {
       connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
       stats: await getPersistentStats().catch(error => ({
         error: errorMessage(error)
+      })),
+      streams: await getStreamPersistenceStats().catch(error => ({
+        error: errorMessage(error)
       }))
     })
   );
@@ -705,7 +745,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     json(res, 200, {
       config: persistenceConfig(),
       connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
-      stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) }))
+      stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) })),
+      streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
   }
@@ -849,8 +890,10 @@ const httpServer = createServer(async (req, res) => {
 
 let backgroundScanRunning = false;
 let resolutionWorkerRunning = false;
+let streamPersistRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
+const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -891,6 +934,39 @@ async function runBackgroundScan() {
     }));
   } finally {
     backgroundScanRunning = false;
+  }
+}
+
+async function runStreamPersistenceWorker() {
+  if (streamPersistRunning) return;
+  streamPersistRunning = true;
+  try {
+    const quotes = realtimeTracker.getQuotes();
+    const sportsEvents = sportsTracker.drainPendingEvents(500);
+
+    const [quoteResult, sportsResult] = await Promise.all([
+      persistRealtimeQuotes(quotes),
+      persistSportsEvents(sportsEvents)
+    ]);
+
+    if ((quoteResult.inserted || 0) > 0 || (sportsResult.inserted || 0) > 0) {
+      console.log(JSON.stringify({
+        level: "info",
+        message: "stream_persistence",
+        quotesInserted: quoteResult.inserted || 0,
+        sportsEventsInserted: sportsResult.inserted || 0,
+        at: new Date().toISOString()
+      }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "stream_persistence_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    streamPersistRunning = false;
   }
 }
 
@@ -970,6 +1046,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     })));
 
   sportsTracker.start();
+
+  runStreamPersistenceWorker().catch(() => {});
+  setInterval(() => {
+    runStreamPersistenceWorker().catch(() => {});
+  }, STREAM_PERSIST_SECONDS * 1000).unref();
 
   runBackgroundScan().catch(() => {});
   setInterval(() => {
