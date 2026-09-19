@@ -138,6 +138,46 @@ export async function listActiveMarketsEndingBetween(
   return [...byKey.values()];
 }
 
+export async function listClosedMarketsEndingBetween(
+  start: Date,
+  end: Date,
+  maxPages = 20,
+  pageSize = 100
+): Promise<GammaMarket[]> {
+  const byKey = new Map<string, GammaMarket>();
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * pageSize;
+    const params = new URLSearchParams({
+      closed: "true",
+      end_date_min: start.toISOString(),
+      end_date_max: end.toISOString(),
+      order: "endDate",
+      ascending: "false",
+      limit: String(pageSize),
+      offset: String(offset)
+    });
+
+    let batch: GammaMarket[];
+    try {
+      batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (page > 0 && message.includes("422")) break;
+      throw error;
+    }
+
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    for (const market of batch) {
+      const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
+      byKey.set(key, market);
+    }
+    if (batch.length < pageSize) break;
+  }
+
+  return [...byKey.values()];
+}
+
 export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
   const params = new URLSearchParams({ slug });
   const markets = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
@@ -227,6 +267,21 @@ export async function getRecentTrades(conditionId: string, limit = 100): Promise
   });
   const payload = await fetchJson<unknown>(`${DATA_BASE}/trades?${params}`);
   return Array.isArray(payload) ? payload : [];
+}
+
+export async function getPriceHistoryRange(
+  tokenId: string,
+  startTs: number,
+  endTs: number,
+  fidelityMinutes = 5
+): Promise<unknown> {
+  const params = new URLSearchParams({
+    market: tokenId,
+    startTs: String(Math.max(0, Math.floor(startTs))),
+    endTs: String(Math.max(0, Math.floor(endTs))),
+    fidelity: String(Math.max(1, fidelityMinutes))
+  });
+  return fetchJson<unknown>(`${CLOB_BASE}/prices-history?${params}`);
 }
 
 export async function getPriceHistory(tokenId: string, hours = 6, fidelityMinutes = 1): Promise<unknown> {
