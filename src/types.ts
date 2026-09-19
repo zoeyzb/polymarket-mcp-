@@ -123,6 +123,7 @@ export interface ScanCandidate {
   opportunityClass: OpportunityClass;
   opportunityScore: number;
   attentionScore?: number;
+  discoveryScore?: number;
   marketSignals?: {
     priceRegime: import("./intelligence.js").PriceRegimeAnalysis | null;
     tradeFlow: import("./intelligence.js").TradeFlowAnalysis | null;
