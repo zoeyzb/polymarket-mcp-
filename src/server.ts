@@ -20,6 +20,7 @@ import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
 import {
   getCalibrationStats,
+  getHistoricalCandidateStats,
   getPersistentStats,
   getResolutionStats,
   getUnresolvedObservedMarkets,
@@ -140,6 +141,80 @@ export function createMcpServer() {
       inputSchema: { tokenId: z.string().min(1) }
     },
     async input => textResult(await getOrderBook(input.tokenId))
+  );
+
+  server.registerTool(
+    "markets.research_packet",
+    {
+      description: "Build one read-only research packet for a Polymarket market: resolution rules/source, live CLOB books, price regimes, recent trade flow, and durable prior observations. Descriptive only; it does not choose or recommend an outcome.",
+      inputSchema: {
+        slug: z.string().min(1),
+        historyHours: z.number().int().min(1).max(168).default(6),
+        fidelityMinutes: z.number().int().min(1).max(60).default(5)
+      }
+    },
+    async input => {
+      const market = await getMarketBySlug(input.slug);
+      if (!market) return textResult({ ok: false, reason: "market_not_found", slug: input.slug });
+
+      const tokenIds = parseStringArray(market.clobTokenIds);
+      const outcomes = parseStringArray(market.outcomes);
+      const books = tokenIds.length ? await getOrderBooks(tokenIds) : new Map();
+      const history = await Promise.all(tokenIds.map(async tokenId => {
+        const payload = await getPriceHistory(tokenId, input.historyHours, input.fidelityMinutes).catch(() => null);
+        return {
+          tokenId,
+          analysis: payload ? analyzePriceHistoryPayload(payload) : null
+        };
+      }));
+
+      const conditionId = market.conditionId ? String(market.conditionId) : null;
+      const trades = conditionId
+        ? await getRecentTrades(conditionId, 200).catch(() => [])
+        : [];
+      const historical = conditionId
+        ? (await getHistoricalCandidateStats([conditionId]).catch(() => new Map())).get(conditionId) ?? null
+        : null;
+
+      return textResult({
+        ok: true,
+        market: {
+          id: market.id ?? null,
+          slug: market.slug ?? input.slug,
+          question: market.question ?? null,
+          conditionId,
+          endDate: market.endDateIso ?? market.endDate ?? null,
+          active: market.active ?? null,
+          closed: market.closed ?? null,
+          acceptingOrders: market.acceptingOrders ?? null,
+          resolutionSource: market.resolutionSource ?? null,
+          resolutionRules: market.description ?? null,
+          outcomes,
+          displayedOutcomePrices: parseNumberArray(market.outcomePrices),
+          tokenIds
+        },
+        books: tokenIds.map((tokenId, index) => {
+          const book = books.get(tokenId);
+          return {
+            outcome: outcomes[index] ?? `Outcome ${index + 1}`,
+            tokenId,
+            bestBid: book?.bestBid ?? null,
+            bestAsk: book?.bestAsk ?? null,
+            spread: book?.spread ?? null,
+            bidDepthUsdTop5: book?.bidDepthUsdTop5 ?? 0,
+            askDepthUsdTop5: book?.askDepthUsdTop5 ?? 0
+          };
+        }),
+        priceRegimes: history,
+        tradeFlow: analyzeTradeFlowPayload(trades),
+        historicalEvidence: historical,
+        externalEvidenceNeeded: [
+          "Verify the event state using current primary or authoritative sources.",
+          "Check the exact resolution wording and source before interpreting evidence.",
+          "Compare fresh event evidence with current market pricing; do not infer certainty from market price alone."
+        ]
+      });
+    }
   );
 
   server.registerTool(
