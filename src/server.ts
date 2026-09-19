@@ -18,7 +18,17 @@ import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scann
 import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
-import { getCalibrationStats, getPersistentStats, persistScan, persistenceConfig, testPersistenceConnection } from "./persistence.js";
+import {
+  getCalibrationStats,
+  getPersistentStats,
+  getResolutionStats,
+  getUnresolvedObservedMarkets,
+  persistScan,
+  persistenceConfig,
+  recordResolution,
+  testPersistenceConnection
+} from "./persistence.js";
+import { inferFinalResolution } from "./resolutions.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -226,6 +236,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.resolution_history",
+    {
+      description: "Return durable finalized-outcome history counts for previously observed markets. This reports completed market outcomes only and does not predict future winners."
+    },
+    async () => textResult(await getResolutionStats())
+  );
+
+  server.registerTool(
     "system.calibration",
     {
       description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
@@ -350,6 +368,11 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/resolution-history") {
+    json(res, 200, await getResolutionStats().catch(error => ({ error: errorMessage(error) })));
+    return true;
+  }
+
   if (url.pathname === "/api/snapshots") {
     json(res, 200, getSnapshots(numberParam(url, "limit", 100, 1, 500)));
     return true;
@@ -425,7 +448,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
       persistenceHealth: "/api/persistence-health",
-      calibration: "/api/calibration"
+      calibration: "/api/calibration",
+      resolutionHistory: "/api/resolution-history"
     });
     return true;
   }
@@ -472,7 +496,9 @@ const httpServer = createServer(async (req, res) => {
 });
 
 let backgroundScanRunning = false;
+let resolutionWorkerRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
+const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -516,6 +542,56 @@ async function runBackgroundScan() {
   }
 }
 
+async function runResolutionWorker() {
+  if (resolutionWorkerRunning) return;
+  resolutionWorkerRunning = true;
+  try {
+    const unresolved = await getUnresolvedObservedMarkets(100);
+    let recorded = 0;
+    for (const observed of unresolved) {
+      const market = await getMarketBySlug(observed.slug).catch(() => null);
+      if (!market) continue;
+      const resolution = inferFinalResolution(market);
+      if (!resolution) continue;
+
+      await recordResolution({
+        conditionId: observed.conditionId,
+        marketId: observed.marketId,
+        resolvedAt: new Date().toISOString(),
+        winningOutcome: resolution.winningOutcome,
+        winningTokenId: resolution.winningTokenId,
+        source: "gamma_final_prices",
+        payload: {
+          slug: observed.slug,
+          question: observed.question,
+          finalPrices: resolution.finalPrices,
+          winningIndex: resolution.winningIndex
+        }
+      });
+      recorded += 1;
+    }
+
+    if (unresolved.length || recorded) {
+      console.log(JSON.stringify({
+        level: "info",
+        message: "resolution_worker",
+        checked: unresolved.length,
+        recorded,
+        at: new Date().toISOString()
+      }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "resolution_worker_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    resolutionWorkerRunning = false;
+  }
+}
+
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(JSON.stringify({
     level: "info",
@@ -545,6 +621,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   setInterval(() => {
     runBackgroundScan().catch(() => {});
   }, BACKGROUND_SCAN_SECONDS * 1000).unref();
+
+  runResolutionWorker().catch(() => {});
+  setInterval(() => {
+    runResolutionWorker().catch(() => {});
+  }, RESOLUTION_CHECK_SECONDS * 1000).unref();
 });
 
 function shutdown(signal: string) {
