@@ -38,6 +38,7 @@ import {
   getRealtimeTargetStats,
   getStreamPersistenceStats,
   getUnresolvedObservedMarkets,
+  getWorkerHeartbeats,
   persistAlertsFromScan,
   persistRealtimeQuotes,
   persistScan,
@@ -46,7 +47,8 @@ import {
   persistenceConfig,
   recordResolution,
   testPersistenceConnection,
-  upsertHistoricalCalibrationSample
+  upsertHistoricalCalibrationSample,
+  upsertWorkerHeartbeat
 } from "./persistence.js";
 import { inferFinalResolution } from "./resolutions.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
@@ -212,13 +214,22 @@ async function runSystemAudit() {
     detail: JSON.stringify(mcpSelfTest)
   });
 
-  const sports = sportsTracker.getHealth();
-  findings.push({
-    id: "sports_feed_connection",
-    ok: sports.state === "streaming" || sports.state === "connecting",
-    severity: "warning",
-    detail: `state=${sports.state}, cachedEvents=${sports.cachedEvents}, lastError=${sports.lastError ?? "none"}`
-  });
+  const workerHeartbeats = await getWorkerHeartbeats().catch(() => []);
+  if (SERVICE_ROLE === "api") {
+    const requiredRoles = ["scanner", "streams", "history", "maintenance"];
+    const freshnessMs = Math.max(30_000, Number(process.env.WORKER_HEARTBEAT_MAX_AGE_MS || 60_000));
+    const staleRoles = requiredRoles.filter(role => {
+      const heartbeat = workerHeartbeats.find(item => item.role === role);
+      if (!heartbeat?.updatedAt) return true;
+      return Date.now() - Date.parse(heartbeat.updatedAt) > freshnessMs;
+    });
+    findings.push({
+      id: "distributed_worker_heartbeats",
+      ok: staleRoles.length === 0,
+      severity: "critical",
+      detail: `staleOrMissing=${staleRoles.join(",") || "none"}, maxAgeMs=${freshnessMs}`
+    });
+  }
 
   const streamPersistence = await getStreamPersistenceStats().catch(error => ({
     configured: true,
@@ -228,43 +239,83 @@ async function runSystemAudit() {
     sportsEventRows: 0,
     lastSportsEventAt: null
   })) as any;
+  const targetStats = await getRealtimeTargetStats().catch(() => ({
+    activeTargets: 0,
+    storedTargets: 0
+  })) as any;
 
-  if (sports.sportResultCount > 0) {
-    const sportsAgeSeconds = streamPersistence.lastSportsEventAt
-      ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastSportsEventAt)) / 1000)
-      : Infinity;
+  let realtime: any = null;
+  let sports: any = null;
+
+  if (ROLE_STREAMS) {
+    sports = sportsTracker.getHealth();
     findings.push({
-      id: "sports_event_persistence",
-      ok: sportsAgeSeconds <= 120,
+      id: "sports_feed_connection",
+      ok: sports.state === "streaming" || sports.state === "connecting",
       severity: "warning",
-      detail: `rows=${streamPersistence.sportsEventRows}, ageSeconds=${Number.isFinite(sportsAgeSeconds) ? sportsAgeSeconds.toFixed(2) : "missing"}`
+      detail: `state=${sports.state}, cachedEvents=${sports.cachedEvents}, lastError=${sports.lastError ?? "none"}`
     });
-  }
 
-  const realtime = realtimeTracker.getHealth();
+    if (sports.sportResultCount > 0) {
+      const sportsAgeSeconds = streamPersistence.lastSportsEventAt
+        ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastSportsEventAt)) / 1000)
+        : Infinity;
+      findings.push({
+        id: "sports_event_persistence",
+        ok: sportsAgeSeconds <= 120,
+        severity: "warning",
+        detail: `rows=${streamPersistence.sportsEventRows}, ageSeconds=${Number.isFinite(sportsAgeSeconds) ? sportsAgeSeconds.toFixed(2) : "missing"}`
+      });
+    }
 
-  if (realtime.subscribedTokens > 0 && realtime.cachedQuotes > 0) {
-    const quoteAgeSeconds = streamPersistence.lastRealtimeQuoteAt
-      ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastRealtimeQuoteAt)) / 1000)
-      : Infinity;
-    findings.push({
-      id: "realtime_quote_persistence",
-      ok: quoteAgeSeconds <= 30,
-      severity: "critical",
-      detail: `rows=${streamPersistence.realtimeQuoteRows}, ageSeconds=${Number.isFinite(quoteAgeSeconds) ? quoteAgeSeconds.toFixed(2) : "missing"}`
-    });
+    realtime = realtimeTracker.getHealth();
+    if (realtime.subscribedTokens > 0 && realtime.cachedQuotes > 0) {
+      const quoteAgeSeconds = streamPersistence.lastRealtimeQuoteAt
+        ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastRealtimeQuoteAt)) / 1000)
+        : Infinity;
+      findings.push({
+        id: "realtime_quote_persistence",
+        ok: quoteAgeSeconds <= 30,
+        severity: "critical",
+        detail: `rows=${streamPersistence.realtimeQuoteRows}, ageSeconds=${Number.isFinite(quoteAgeSeconds) ? quoteAgeSeconds.toFixed(2) : "missing"}`
+      });
+    }
+  } else if (SERVICE_ROLE === "api") {
+    const streamsHeartbeat = workerHeartbeats.find(item => item.role === "streams");
+    const streamDetails = (streamsHeartbeat?.details || {}) as any;
+    sports = streamDetails.sports ?? null;
+    realtime = streamDetails.realtime ?? null;
+
+    if (sports) {
+      findings.push({
+        id: "sports_feed_connection",
+        ok: sports.state === "streaming" || sports.state === "connecting",
+        severity: "warning",
+        detail: `distributedState=${sports.state}, cachedEvents=${sports.cachedEvents ?? 0}`
+      });
+    }
+
+    if (Number(targetStats.activeTargets || 0) > 0) {
+      const quoteAgeSeconds = streamPersistence.lastRealtimeQuoteAt
+        ? Math.max(0, (Date.now() - Date.parse(streamPersistence.lastRealtimeQuoteAt)) / 1000)
+        : Infinity;
+      findings.push({
+        id: "realtime_quote_persistence",
+        ok: quoteAgeSeconds <= 45,
+        severity: "critical",
+        detail: `targets=${targetStats.activeTargets}, rows=${streamPersistence.realtimeQuoteRows}, ageSeconds=${Number.isFinite(quoteAgeSeconds) ? quoteAgeSeconds.toFixed(2) : "missing"}`
+      });
+
+      if (realtime) {
+        findings.push({
+          id: "realtime_subscription_consistency",
+          ok: Number(realtime.subscribedTokens || 0) >= Number(targetStats.activeTargets || 0) || realtime.state === "connecting",
+          severity: "warning",
+          detail: `targets=${targetStats.activeTargets}, subscribed=${realtime.subscribedTokens ?? 0}, state=${realtime.state ?? "unknown"}`
+        });
+      }
+    }
   }
-  const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
-  const realtimeConsistent =
-    expectedTokens === 0
-      ? realtime.subscribedTokens >= 0
-      : realtime.subscribedTokens >= expectedTokens || realtime.state === "connecting";
-  findings.push({
-    id: "realtime_subscription_consistency",
-    ok: realtimeConsistent,
-    severity: "warning",
-    detail: `urgent2hTokens=${expectedTokens}, subscribedTokens=${realtime.subscribedTokens}, state=${realtime.state}; subscriptions may exceed urgent tokens because multi-horizon mode also tracks <=6h and structural edges`
-  });
 
   return {
     generatedAt: new Date().toISOString(),
@@ -278,6 +329,8 @@ async function runSystemAudit() {
     },
     persistence: integrity,
     streamPersistence,
+    realtimeTargets: targetStats,
+    workerHeartbeats,
     realtime,
     sports
   };
@@ -993,6 +1046,46 @@ const httpServer = createServer(async (req, res) => {
   }
 });
 
+let heartbeatRunning = false;
+
+async function runWorkerHeartbeat() {
+  if (heartbeatRunning) return;
+  heartbeatRunning = true;
+  try {
+    const details: Record<string, unknown> = {
+      version: VERSION,
+      role: SERVICE_ROLE,
+      at: new Date().toISOString()
+    };
+
+    if (ROLE_STREAMS) {
+      details.realtime = realtimeTracker.getHealth();
+      details.sports = sportsTracker.getHealth();
+    }
+    if (ROLE_SCANNER) {
+      details.realtimeTargets = await getRealtimeTargetStats().catch(() => null);
+    }
+    if (ROLE_HISTORY) {
+      details.historicalCalibration = await getHistoricalCalibrationSummary().catch(() => null);
+    }
+    if (ROLE_MAINTENANCE) {
+      details.maintenance = await getMaintenanceStats().catch(() => null);
+    }
+
+    await upsertWorkerHeartbeat(SERVICE_ROLE, details);
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "worker_heartbeat_failed",
+      role: SERVICE_ROLE,
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    heartbeatRunning = false;
+  }
+}
+
 let backgroundScanRunning = false;
 let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
@@ -1339,6 +1432,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     version: VERSION,
     port: PORT,
     mode: "read-only",
+    serviceRole: SERVICE_ROLE,
     mcp: "/mcp",
     at: new Date().toISOString()
   }));
@@ -1356,6 +1450,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       error: errorMessage(error),
       at: new Date().toISOString()
     })));
+
+  runWorkerHeartbeat().catch(() => {});
+  setInterval(() => {
+    runWorkerHeartbeat().catch(() => {});
+  }, 15_000).unref();
 
   if (ROLE_STREAMS) {
     sportsTracker.start();
