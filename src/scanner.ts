@@ -13,6 +13,7 @@ import {
 } from "./intelligence.js";
 import { recordSnapshot } from "./snapshots.js";
 import { getHistoricalCandidateStats } from "./persistence.js";
+import { getExternalCryptoEvidence } from "./external-evidence.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -496,6 +497,35 @@ async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
   }
 }
 
+async function enrichExternalEvidence(candidates: ScanCandidate[]) {
+  const targets = candidates.slice(0, Math.max(0, Math.min(100, Number(process.env.EXTERNAL_EVIDENCE_LIMIT || 50))));
+  const queue = [...targets];
+  const concurrency = Math.max(1, Math.min(10, Number(process.env.EXTERNAL_EVIDENCE_CONCURRENCY || 4)));
+
+  async function worker() {
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate) return;
+      const evidence = await getExternalCryptoEvidence(candidate.question).catch(() => null);
+      candidate.externalEvidence = evidence;
+
+      if (!evidence) continue;
+      for (const flag of evidence.flags) {
+        if (!candidate.flags.includes(flag)) candidate.flags.push(flag);
+      }
+
+      if (evidence.nearThreshold) {
+        candidate.attentionScore = round(
+          Math.min(100, (candidate.attentionScore ?? candidate.opportunityScore) + 8),
+          1
+        );
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length || 1) }, worker));
+}
+
 async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
   const conditionIds = candidates
     .map(candidate => candidate.conditionId)
@@ -573,6 +603,7 @@ export async function scanClosingSoon(options?: {
 
   if (includeOrderBooks && enriched.length) {
     await enrichBehaviorSignals(enriched);
+    await enrichExternalEvidence(enriched);
     await enrichHistoricalEvidence(enriched);
   }
 
