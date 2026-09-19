@@ -405,6 +405,7 @@ export async function getPersistenceIntegrity() {
       from (
         select generated_at
         from polymarket_brain.scans
+        where writer_id = $1
         order by generated_at desc
         limit 20
       ) x
@@ -432,7 +433,7 @@ export async function getPersistenceIntegrity() {
       (select count(*)::int from active_writers) as "activeWriterCount",
       (select holder from polymarket_brain.writer_lease where lease_name='scan-writer') as "leaseHolder",
       (select lease_until from polymarket_brain.writer_lease where lease_name='scan-writer') as "leaseUntil"
-  `);
+  `, [WRITER_ID]);
 
   const row = rows[0] || {};
   const lastScanAt = row.lastScanAt ? new Date(row.lastScanAt).toISOString() : null;
