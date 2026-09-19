@@ -199,3 +199,70 @@ export function analyzePriceHistoryPayload(payload: unknown): PriceRegimeAnalysi
     anomalyScore: round(anomalyScore, 1)
   };
 }
+
+
+export interface TradeFlowAnalysis {
+  trades: number;
+  buyUsd: number;
+  sellUsd: number;
+  totalUsd: number;
+  signedImbalance: number;
+  largestTradeUsd: number;
+  recent5mUsd: number;
+  recent15mUsd: number;
+  avgTradeUsd: number;
+  flowScore: number;
+}
+
+export function analyzeTradeFlowPayload(payload: unknown, nowMs = Date.now()): TradeFlowAnalysis {
+  const rows = Array.isArray(payload) ? payload : [];
+  let buyUsd = 0;
+  let sellUsd = 0;
+  let largestTradeUsd = 0;
+  let recent5mUsd = 0;
+  let recent15mUsd = 0;
+  let trades = 0;
+
+  for (const row of rows as any[]) {
+    const price = n(row?.price);
+    const size = n(row?.size);
+    if (price <= 0 || price > 1 || size <= 0) continue;
+    const usd = price * size;
+    const side = String(row?.side || "").toUpperCase();
+    if (side === "BUY") buyUsd += usd;
+    else if (side === "SELL") sellUsd += usd;
+    else continue;
+
+    trades += 1;
+    largestTradeUsd = Math.max(largestTradeUsd, usd);
+
+    const rawTs = n(row?.timestamp);
+    const timestampMs = rawTs > 10_000_000_000 ? rawTs : rawTs * 1000;
+    const ageMs = nowMs - timestampMs;
+    if (ageMs >= 0 && ageMs <= 5 * 60_000) recent5mUsd += usd;
+    if (ageMs >= 0 && ageMs <= 15 * 60_000) recent15mUsd += usd;
+  }
+
+  const totalUsd = buyUsd + sellUsd;
+  const imbalance = totalUsd > 0 ? (buyUsd - sellUsd) / totalUsd : 0;
+  const avgTradeUsd = trades > 0 ? totalUsd / trades : 0;
+  const flowScore = Math.min(
+    100,
+    Math.abs(imbalance) * 35 +
+    Math.log10(Math.max(1, recent5mUsd)) * 12 +
+    Math.log10(Math.max(1, largestTradeUsd)) * 8
+  );
+
+  return {
+    trades,
+    buyUsd: round(buyUsd, 2),
+    sellUsd: round(sellUsd, 2),
+    totalUsd: round(totalUsd, 2),
+    signedImbalance: round(imbalance, 4),
+    largestTradeUsd: round(largestTradeUsd, 2),
+    recent5mUsd: round(recent5mUsd, 2),
+    recent15mUsd: round(recent15mUsd, 2),
+    avgTradeUsd: round(avgTradeUsd, 2),
+    flowScore: round(flowScore, 1)
+  };
+}
