@@ -52,6 +52,12 @@ export async function getPersistentStats() {
   return { configured: true, ...result };
 }
 
+export async function getCalibrationStats() {
+  if (!configured()) return { configured: false, reason: "not_configured" };
+  const result = await rpc<Record<string, unknown>>("polymarket_brain_calibration");
+  return { configured: true, ...result };
+}
+
 export function persistenceConfig() {
   return {
     configured: configured(),
