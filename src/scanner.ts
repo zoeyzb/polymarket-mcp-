@@ -220,7 +220,7 @@ function scoreCandidate(
   };
 }
 
-function eventMeta(market: GammaMarket): { id: string; title: string | null; negRisk: boolean } | null {
+function eventMeta(market: GammaMarket): { id: string; title: string | null; negRisk: boolean; augmented: boolean } | null {
   const event = Array.isArray(market.events) && market.events.length
     ? market.events[0] as Record<string, unknown>
     : null;
@@ -230,7 +230,8 @@ function eventMeta(market: GammaMarket): { id: string; title: string | null; neg
   return {
     id: String(id),
     title: event.title ? String(event.title) : null,
-    negRisk: market.negRisk === true || event.negRisk === true
+    negRisk: market.negRisk === true || market.enableNegRisk === true || event.negRisk === true || event.enableNegRisk === true,
+    augmented: market.negRiskAugmented === true || event.negRiskAugmented === true
   };
 }
 
@@ -248,13 +249,14 @@ function buildEventBasketOpportunities(
   allBooks: Map<string, NormalizedBook>,
   bufferBps: number
 ): EventBasketOpportunity[] {
-  const groups = new Map<string, { title: string | null; negRisk: boolean; markets: GammaMarket[] }>();
+  const groups = new Map<string, { title: string | null; negRisk: boolean; augmented: boolean; markets: GammaMarket[] }>();
 
   for (const market of allActive) {
     const meta = eventMeta(market);
     if (!meta) continue;
-    const current = groups.get(meta.id) ?? { title: meta.title, negRisk: meta.negRisk, markets: [] };
+    const current = groups.get(meta.id) ?? { title: meta.title, negRisk: meta.negRisk, augmented: meta.augmented, markets: [] };
     current.negRisk = current.negRisk || meta.negRisk;
+    current.augmented = current.augmented || meta.augmented;
     if (!current.title && meta.title) current.title = meta.title;
     current.markets.push(market);
     groups.set(meta.id, current);
@@ -262,7 +264,7 @@ function buildEventBasketOpportunities(
 
   const results: EventBasketOpportunity[] = [];
   for (const [eventId, group] of groups) {
-    if (!group.negRisk || group.markets.length < 3) continue;
+    if (!group.negRisk || group.augmented || group.markets.length < 3) continue;
 
     const completeWindow = group.markets.every(market => {
       const end = getEndDate(market);
