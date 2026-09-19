@@ -1,22 +1,29 @@
 import {
-  getOrderBook,
+  getOrderBooks,
   listActiveMarketsEndingBetween,
   parseNumberArray,
   parseStringArray
 } from "./polymarket.js";
 import type {
+  CompleteSetExecution,
   ExecutionEstimate,
   GammaMarket,
   NormalizedBook,
+  OpportunityClass,
   ScanCandidate,
   ScanResult
 } from "./types.js";
 
 const BUDGETS = [10, 25, 50, 100];
+const DEFAULT_BUFFER_BPS = Math.max(0, Number(process.env.OPPORTUNITY_BUFFER_BPS || 50));
 
 function n(value: unknown): number {
   const x = typeof value === "number" ? value : Number(value);
   return Number.isFinite(x) ? x : 0;
+}
+
+function round(value: number, digits = 4): number {
+  return Number(value.toFixed(digits));
 }
 
 function getEndDate(market: GammaMarket): string | null {
@@ -26,14 +33,17 @@ function getEndDate(market: GammaMarket): string | null {
   return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
 }
 
-function executionEstimate(book: NormalizedBook, budgetUsd: number): ExecutionEstimate {
-  const asks = Array.isArray(book.raw.asks)
+function sortedAsks(book: NormalizedBook) {
+  return Array.isArray(book.raw.asks)
     ? book.raw.asks
         .map(x => ({ price: n(x.price), size: n(x.size) }))
         .filter(x => x.price > 0 && x.price <= 1 && x.size > 0)
         .sort((a, b) => a.price - b.price)
     : [];
+}
 
+function executionEstimate(book: NormalizedBook, budgetUsd: number): ExecutionEstimate {
+  const asks = sortedAsks(book);
   let remaining = budgetUsd;
   let spent = 0;
   let shares = 0;
@@ -53,111 +63,108 @@ function executionEstimate(book: NormalizedBook, budgetUsd: number): ExecutionEs
   const profit = maxPayout - spent;
   return {
     budgetUsd,
-    spendableUsd: Number(spent.toFixed(4)),
-    avgFillPrice: avg === null ? null : Number(avg.toFixed(6)),
-    shares: Number(shares.toFixed(4)),
-    maxPayoutIfWinning: Number(maxPayout.toFixed(4)),
-    profitIfWinning: Number(profit.toFixed(4)),
-    roiIfWinningPct: spent > 0 ? Number(((profit / spent) * 100).toFixed(2)) : null,
-    fillPct: Number(((spent / budgetUsd) * 100).toFixed(2))
+    spendableUsd: round(spent),
+    avgFillPrice: avg === null ? null : round(avg, 6),
+    shares: round(shares),
+    maxPayoutIfWinning: round(maxPayout),
+    profitIfWinning: round(profit),
+    roiIfWinningPct: spent > 0 ? round((profit / spent) * 100, 2) : null,
+    fillPct: round((spent / budgetUsd) * 100, 2)
   };
+}
+
+function costForShares(book: NormalizedBook, targetShares: number): { complete: boolean; cost: number } {
+  if (targetShares <= 0) return { complete: false, cost: 0 };
+  let remaining = targetShares;
+  let cost = 0;
+  for (const level of sortedAsks(book)) {
+    if (remaining <= 1e-9) break;
+    const take = Math.min(remaining, level.size);
+    cost += take * level.price;
+    remaining -= take;
+  }
+  return { complete: remaining <= 1e-7, cost };
 }
 
 export function calculateCompleteSetExecution(
   books: NormalizedBook[],
   budgetUsd: number,
-  executionBufferBps = 50
-) {
-  if (books.length < 2 || budgetUsd <= 0) {
+  bufferBps = DEFAULT_BUFFER_BPS
+): CompleteSetExecution {
+  if (books.length !== 2 || budgetUsd <= 0 || books.some(book => sortedAsks(book).length === 0)) {
     return {
+      budgetUsd,
+      bufferBps,
       fillComplete: false,
       sharesEach: 0,
-      totalCost: 0,
-      grossPayout: 0,
+      totalCostUsd: 0,
+      guaranteedPayoutUsd: 0,
       grossProfit: 0,
-      executionBufferUsd: 0,
+      grossRoiPct: null,
+      bufferCostUsd: 0,
       netProfitAfterBuffer: 0,
-      netRoiPct: 0
+      netRoiPct: null
     };
   }
 
-  const asksByBook = books.map(book =>
-    (book.raw.asks || [])
-      .map(level => ({ price: n(level.price), size: n(level.size) }))
-      .filter(level => level.price > 0 && level.price <= 1 && level.size > 0)
-      .sort((a, b) => a.price - b.price)
+  const maxSharesByDepth = Math.min(
+    ...books.map(book => sortedAsks(book).reduce((sum, level) => sum + level.size, 0))
   );
-
-  if (asksByBook.some(levels => levels.length === 0)) {
-    return {
-      fillComplete: false,
-      sharesEach: 0,
-      totalCost: 0,
-      grossPayout: 0,
-      grossProfit: 0,
-      executionBufferUsd: 0,
-      netProfitAfterBuffer: 0,
-      netRoiPct: 0
-    };
-  }
-
-  const maxShares = Math.min(
-    ...asksByBook.map(levels => levels.reduce((sum, level) => sum + level.size, 0))
-  );
-
-  const costForShares = (levels: Array<{ price: number; size: number }>, shares: number) => {
-    let remaining = shares;
-    let cost = 0;
-    for (const level of levels) {
-      if (remaining <= 0) break;
-      const take = Math.min(remaining, level.size);
-      cost += take * level.price;
-      remaining -= take;
-    }
-    return remaining > 1e-9 ? Number.POSITIVE_INFINITY : cost;
-  };
-
-  const totalCostForShares = (shares: number) =>
-    asksByBook.reduce((sum, levels) => sum + costForShares(levels, shares), 0);
 
   let low = 0;
-  let high = maxShares;
-  for (let i = 0; i < 60; i++) {
+  let high = maxSharesByDepth;
+  for (let i = 0; i < 45; i++) {
     const mid = (low + high) / 2;
-    if (totalCostForShares(mid) <= budgetUsd) low = mid;
+    let totalCost = 0;
+    let complete = true;
+    for (const book of books) {
+      const fill = costForShares(book, mid);
+      if (!fill.complete) {
+        complete = false;
+        break;
+      }
+      totalCost += fill.cost;
+    }
+    if (complete && totalCost <= budgetUsd) low = mid;
     else high = mid;
   }
 
-  const sharesEach = low;
-  const totalCost = totalCostForShares(sharesEach);
-  if (!Number.isFinite(totalCost) || sharesEach <= 1e-9) {
+  if (low <= 1e-7) {
     return {
+      budgetUsd,
+      bufferBps,
       fillComplete: false,
       sharesEach: 0,
-      totalCost: 0,
-      grossPayout: 0,
+      totalCostUsd: 0,
+      guaranteedPayoutUsd: 0,
       grossProfit: 0,
-      executionBufferUsd: 0,
+      grossRoiPct: null,
+      bufferCostUsd: 0,
       netProfitAfterBuffer: 0,
-      netRoiPct: 0
+      netRoiPct: null
     };
   }
 
-  const grossPayout = sharesEach;
-  const grossProfit = grossPayout - totalCost;
-  const executionBufferUsd = totalCost * (Math.max(0, executionBufferBps) / 10000);
-  const netProfitAfterBuffer = grossProfit - executionBufferUsd;
-  const netRoiPct = totalCost > 0 ? (netProfitAfterBuffer / totalCost) * 100 : 0;
+  const fills = books.map(book => costForShares(book, low));
+  const fillComplete = fills.every(fill => fill.complete);
+  const totalCost = fills.reduce((sum, fill) => sum + fill.cost, 0);
+  const payout = low;
+  const grossProfit = payout - totalCost;
+  const bufferCost = totalCost * (Math.max(0, bufferBps) / 10000);
+  const netProfit = grossProfit - bufferCost;
 
   return {
-    fillComplete: true,
-    sharesEach: Number(sharesEach.toFixed(6)),
-    totalCost: Number(totalCost.toFixed(6)),
-    grossPayout: Number(grossPayout.toFixed(6)),
-    grossProfit: Number(grossProfit.toFixed(6)),
-    executionBufferUsd: Number(executionBufferUsd.toFixed(6)),
-    netProfitAfterBuffer: Number(netProfitAfterBuffer.toFixed(6)),
-    netRoiPct: Number(netRoiPct.toFixed(4))
+    budgetUsd,
+    bufferBps,
+    fillComplete,
+    sharesEach: round(low),
+    totalCostUsd: round(totalCost),
+    guaranteedPayoutUsd: round(payout),
+    grossProfit: round(grossProfit),
+    grossRoiPct: totalCost > 0 ? round((grossProfit / totalCost) * 100, 3) : null,
+    bufferCostUsd: round(bufferCost),
+    netProfitAfterBuffer: round(netProfit),
+    netRoiPct: totalCost > 0 ? round((netProfit / totalCost) * 100, 3) : null
   };
 }
 
@@ -189,38 +196,62 @@ function scoreCandidate(
 
   const score = spreadScore + liquidityScore + depthScore + urgencyScore + rulesScore + activityScore;
   return {
-    score: Number(Math.min(100, Math.max(0, score)).toFixed(1)),
+    score: round(Math.min(100, Math.max(0, score)), 1),
     breakdown: {
-      spread: Number(spreadScore.toFixed(1)),
-      liquidity: Number(liquidityScore.toFixed(1)),
-      orderBookDepth: Number(depthScore.toFixed(1)),
-      urgency: Number(urgencyScore.toFixed(1)),
-      resolutionClarity: Number(rulesScore.toFixed(1)),
-      activity: Number(activityScore.toFixed(1))
+      spread: round(spreadScore, 1),
+      liquidity: round(liquidityScore, 1),
+      orderBookDepth: round(depthScore, 1),
+      urgency: round(urgencyScore, 1),
+      resolutionClarity: round(rulesScore, 1),
+      activity: round(activityScore, 1)
     },
     flags
   };
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  async function run() {
-    while (true) {
-      const current = next++;
-      if (current >= items.length) return;
-      results[current] = await worker(items[current], current);
-    }
+function classifyOpportunity(
+  tradabilityScore: number,
+  topAskTotal: number | null,
+  executions: CompleteSetExecution[]
+): { opportunityClass: OpportunityClass; opportunityScore: number; best: CompleteSetExecution | null } {
+  const positive = executions
+    .filter(x => x.fillComplete && x.netProfitAfterBuffer > 0 && (x.netRoiPct ?? 0) > 0)
+    .sort((a, b) => b.netProfitAfterBuffer - a.netProfitAfterBuffer || (b.netRoiPct ?? 0) - (a.netRoiPct ?? 0));
+
+  const best = positive[0] ?? null;
+  if (best) {
+    const profitComponent = Math.min(25, best.netProfitAfterBuffer * 3);
+    const roiComponent = Math.min(25, (best.netRoiPct ?? 0) * 3);
+    const qualityComponent = Math.min(30, tradabilityScore * 0.3);
+    return {
+      opportunityClass: "executable_structural",
+      opportunityScore: round(Math.min(100, 40 + profitComponent + roiComponent + qualityComponent), 1),
+      best
+    };
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  return results;
+
+  if (topAskTotal !== null && topAskTotal < 1) {
+    return {
+      opportunityClass: "top_book_structural_only",
+      opportunityScore: round(Math.min(69, 25 + (1 - topAskTotal) * 200 + tradabilityScore * 0.25), 1),
+      best: null
+    };
+  }
+
+  return {
+    opportunityClass: "research_candidate",
+    opportunityScore: round(Math.min(49, tradabilityScore * 0.49), 1),
+    best: null
+  };
 }
 
-async function enrichMarket(market: GammaMarket, now: number, includeBooks: boolean): Promise<ScanCandidate | null> {
+async function enrichMarket(
+  market: GammaMarket,
+  now: number,
+  includeBooks: boolean,
+  allBooks: Map<string, NormalizedBook>,
+  bufferBps: number
+): Promise<ScanCandidate | null> {
   const endDate = getEndDate(market);
   if (!endDate) return null;
   const endTs = Date.parse(endDate);
@@ -230,40 +261,40 @@ async function enrichMarket(market: GammaMarket, now: number, includeBooks: bool
   const tokenIds = parseStringArray(market.clobTokenIds);
   const outcomes = parseStringArray(market.outcomes);
   const displayedOutcomePrices = parseNumberArray(market.outcomePrices);
-  let books: NormalizedBook[] = [];
-
-  if (includeBooks && tokenIds.length) {
-    books = await mapWithConcurrency(tokenIds, 4, async tokenId => {
-      try {
-        return await getOrderBook(tokenId);
-      } catch {
-        return {
-          tokenId,
-          bestBid: null,
-          bestAsk: null,
-          spread: null,
-          midpoint: null,
-          bidDepthUsdTop5: 0,
-          askDepthUsdTop5: 0,
-          raw: { bids: [], asks: [] }
-        };
-      }
-    });
-  }
+  const books = includeBooks
+    ? tokenIds.map(tokenId => allBooks.get(tokenId)).filter((x): x is NormalizedBook => Boolean(x))
+    : [];
 
   const scoring = scoreCandidate(market, minutesRemaining, books);
   let binaryArbitrage: ScanCandidate["binaryArbitrage"] = null;
-  if (books.length === 2 && books[0].bestAsk !== null && books[1].bestAsk !== null) {
-    const total = books[0].bestAsk + books[1].bestAsk;
-    if (total < 1) {
-      binaryArbitrage = {
-        buyBothAskTotal: Number(total.toFixed(6)),
-        grossEdgePerDollar: Number((1 - total).toFixed(6)),
-        grossEdgePct: Number(((1 - total) * 100).toFixed(3)),
-        note: "Structural only: both legs must actually fill at these asks; fees, slippage, size limits, and resolution risk can erase the edge."
-      };
-      scoring.flags.push("binary_buy_both_structural_edge");
+  let topAskTotal: number | null = null;
+  let completeSetExecutions: CompleteSetExecution[] = [];
+
+  if (books.length === 2 && books.every(book => book.bestAsk !== null)) {
+    topAskTotal = (books[0].bestAsk as number) + (books[1].bestAsk as number);
+    completeSetExecutions = BUDGETS.map(budget => calculateCompleteSetExecution(books, budget, bufferBps));
+  }
+
+  const opportunity = classifyOpportunity(scoring.score, topAskTotal, completeSetExecutions);
+
+  if (topAskTotal !== null && topAskTotal < 1) {
+    const edge = 1 - topAskTotal;
+    if (opportunity.opportunityClass === "executable_structural") {
+      scoring.flags.push("binary_structural_edge_executable_at_depth");
+    } else {
+      scoring.flags.push("binary_top_book_edge_not_executable_after_depth_buffer");
     }
+
+    binaryArbitrage = {
+      buyBothAskTotal: round(topAskTotal, 6),
+      grossEdgePerDollar: round(edge, 6),
+      grossEdgePct: round(edge * 100, 3),
+      executable: completeSetExecutions,
+      bestExecutableBudgetUsd: opportunity.best?.budgetUsd ?? null,
+      bestNetProfitUsd: opportunity.best?.netProfitAfterBuffer ?? 0,
+      bestNetRoiPct: opportunity.best?.netRoiPct ?? null,
+      note: "Depth-aware complete-set math. Positive net values include the configured execution buffer, but still require simultaneous fills and correct resolution interpretation."
+    };
   }
 
   const marketBooks = books.map((book, i) => ({
@@ -273,8 +304,8 @@ async function enrichMarket(market: GammaMarket, now: number, includeBooks: bool
     bestAsk: book.bestAsk,
     spread: book.spread,
     midpoint: book.midpoint,
-    bidDepthUsdTop5: Number(book.bidDepthUsdTop5.toFixed(2)),
-    askDepthUsdTop5: Number(book.askDepthUsdTop5.toFixed(2)),
+    bidDepthUsdTop5: round(book.bidDepthUsdTop5, 2),
+    askDepthUsdTop5: round(book.askDepthUsdTop5, 2),
     executions: BUDGETS.map(budget => executionEstimate(book, budget))
   }));
 
@@ -284,11 +315,11 @@ async function enrichMarket(market: GammaMarket, now: number, includeBooks: bool
     question: String(market.question || "Untitled market"),
     conditionId: market.conditionId ? String(market.conditionId) : null,
     endDate,
-    minutesRemaining: Number(minutesRemaining.toFixed(2)),
+    minutesRemaining: round(minutesRemaining, 2),
     acceptingOrders: market.acceptingOrders !== false,
-    liquidityUsd: Number(n(market.liquidityNum ?? market.liquidity).toFixed(2)),
-    volumeUsd: Number(n(market.volumeNum ?? market.volume).toFixed(2)),
-    volume24hUsd: Number(n(market.volume24hr).toFixed(2)),
+    liquidityUsd: round(n(market.liquidityNum ?? market.liquidity), 2),
+    volumeUsd: round(n(market.volumeNum ?? market.volume), 2),
+    volume24hUsd: round(n(market.volume24hr), 2),
     outcomes,
     tokenIds,
     displayedOutcomePrices,
@@ -297,6 +328,8 @@ async function enrichMarket(market: GammaMarket, now: number, includeBooks: bool
     url: market.slug ? `https://polymarket.com/event/${market.slug}` : null,
     books: includeBooks ? marketBooks : undefined,
     binaryArbitrage,
+    opportunityClass: opportunity.opportunityClass,
+    opportunityScore: opportunity.opportunityScore,
     rapidReviewScore: scoring.score,
     scoreBreakdown: scoring.breakdown,
     flags: scoring.flags
@@ -309,7 +342,8 @@ export async function scanClosingSoon(options?: {
   includeOrderBooks?: boolean;
   limit?: number;
   offset?: number;
-  sort?: "soonest" | "review_score" | "liquidity";
+  sort?: "soonest" | "review_score" | "liquidity" | "opportunity";
+  bufferBps?: number;
 }): Promise<ScanResult> {
   const maxMinutes = Math.min(120, Math.max(1, options?.maxMinutes ?? 120));
   const minLiquidity = Math.max(0, options?.minLiquidity ?? 0);
@@ -317,23 +351,39 @@ export async function scanClosingSoon(options?: {
   const limit = Math.min(500, Math.max(1, options?.limit ?? 100));
   const offset = Math.max(0, options?.offset ?? 0);
   const sort = options?.sort ?? "soonest";
-  const now = Date.now();
+  const bufferBps = Math.max(0, options?.bufferBps ?? DEFAULT_BUFFER_BPS);
+  const started = Date.now();
+  const now = started;
   const cutoff = now + maxMinutes * 60000;
 
   const all = await listActiveMarketsEndingBetween(new Date(now), new Date(cutoff));
-  const inWindow = all.filter(m => {
-    const endDate = getEndDate(m);
-    if (!endDate) return false;
-    const ts = Date.parse(endDate);
-    return ts >= now && ts <= cutoff && m.active !== false && m.closed !== true && m.acceptingOrders !== false;
-  }).filter(m => n(m.liquidityNum ?? m.liquidity) >= minLiquidity);
+  const inWindow = all
+    .filter(m => {
+      const endDate = getEndDate(m);
+      if (!endDate) return false;
+      const ts = Date.parse(endDate);
+      return ts >= now && ts <= cutoff && m.active !== false && m.closed !== true && m.acceptingOrders !== false;
+    })
+    .filter(m => n(m.liquidityNum ?? m.liquidity) >= minLiquidity);
 
-  const enriched = (await mapWithConcurrency(inWindow, 8, m => enrichMarket(m, now, includeOrderBooks)))
-    .filter((x): x is ScanCandidate => x !== null);
+  const tokenIds = includeOrderBooks
+    ? inWindow.flatMap(m => parseStringArray(m.clobTokenIds))
+    : [];
+  const allBooks = includeOrderBooks ? await getOrderBooks(tokenIds) : new Map<string, NormalizedBook>();
 
-  if (sort === "review_score") enriched.sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || a.minutesRemaining - b.minutesRemaining);
-  else if (sort === "liquidity") enriched.sort((a, b) => b.liquidityUsd - a.liquidityUsd || a.minutesRemaining - b.minutesRemaining);
-  else enriched.sort((a, b) => a.minutesRemaining - b.minutesRemaining);
+  const enriched = (await Promise.all(
+    inWindow.map(m => enrichMarket(m, now, includeOrderBooks, allBooks, bufferBps))
+  )).filter((x): x is ScanCandidate => x !== null);
+
+  if (sort === "opportunity") {
+    enriched.sort((a, b) => b.opportunityScore - a.opportunityScore || a.minutesRemaining - b.minutesRemaining);
+  } else if (sort === "review_score") {
+    enriched.sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || a.minutesRemaining - b.minutesRemaining);
+  } else if (sort === "liquidity") {
+    enriched.sort((a, b) => b.liquidityUsd - a.liquidityUsd || a.minutesRemaining - b.minutesRemaining);
+  } else {
+    enriched.sort((a, b) => a.minutesRemaining - b.minutesRemaining);
+  }
 
   const sliced = enriched.slice(offset, offset + limit);
   return {
@@ -342,21 +392,57 @@ export async function scanClosingSoon(options?: {
     totalActiveMarketsScanned: all.length,
     totalInWindowBeforeFilters: inWindow.length,
     returned: sliced.length,
+    scanDurationMs: Date.now() - started,
     candidates: sliced
   };
 }
 
-export async function scanBinaryArbitrage(maxMinutes = 120, limit = 100) {
+export async function scanOpportunities(options?: {
+  maxMinutes?: number;
+  minLiquidity?: number;
+  minOpportunityScore?: number;
+  limit?: number;
+  bufferBps?: number;
+}) {
+  const minOpportunityScore = Math.min(100, Math.max(0, options?.minOpportunityScore ?? 35));
+  const scan = await scanClosingSoon({
+    maxMinutes: options?.maxMinutes ?? 120,
+    minLiquidity: options?.minLiquidity ?? 0,
+    includeOrderBooks: true,
+    limit: 500,
+    sort: "opportunity",
+    bufferBps: options?.bufferBps
+  });
+
+  const candidates = scan.candidates
+    .filter(c => c.opportunityScore >= minOpportunityScore)
+    .slice(0, Math.min(200, Math.max(1, options?.limit ?? 50)));
+
+  return {
+    ...scan,
+    minOpportunityScore,
+    returned: candidates.length,
+    candidates
+  };
+}
+
+export async function scanBinaryArbitrage(maxMinutes = 120, limit = 100, bufferBps = DEFAULT_BUFFER_BPS) {
   const scan = await scanClosingSoon({
     maxMinutes,
     includeOrderBooks: true,
     limit: 500,
-    sort: "soonest"
+    sort: "opportunity",
+    bufferBps
   });
+
   const opportunities = scan.candidates
-    .filter(c => c.binaryArbitrage)
-    .sort((a, b) => (b.binaryArbitrage?.grossEdgePct || 0) - (a.binaryArbitrage?.grossEdgePct || 0))
+    .filter(c => c.opportunityClass === "executable_structural" && c.binaryArbitrage)
+    .sort((a, b) =>
+      (b.binaryArbitrage?.bestNetProfitUsd || 0) - (a.binaryArbitrage?.bestNetProfitUsd || 0) ||
+      (b.binaryArbitrage?.bestNetRoiPct || 0) - (a.binaryArbitrage?.bestNetRoiPct || 0)
+    )
     .slice(0, Math.min(200, Math.max(1, limit)));
+
   return {
     ...scan,
     returned: opportunities.length,
