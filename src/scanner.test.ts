@@ -8,6 +8,7 @@ import {
 } from "./intelligence.js";
 import { inferFinalResolution } from "./resolutions.js";
 import { parseCryptoThresholdQuestion } from "./external-evidence.js";
+import { auditScanResult, summarizeAudit } from "./audit.js";
 import type { NormalizedBook } from "./types.js";
 
 function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
@@ -198,5 +199,59 @@ describe("crypto threshold parsing", () => {
   it("rejects unsupported or ambiguous questions", () => {
     expect(parseCryptoThresholdQuestion("Will Bitcoin go up today?")).toBeNull();
     expect(parseCryptoThresholdQuestion("Will gold be above $4,000?")).toBeNull();
+  });
+});
+
+
+describe("system audit invariants", () => {
+  it("accepts an empty but valid two-hour window", () => {
+    const findings = auditScanResult({
+      generatedAt: new Date().toISOString(),
+      maxMinutes: 120,
+      totalActiveMarketsScanned: 2100,
+      totalInWindowBeforeFilters: 0,
+      returned: 0,
+      scanDurationMs: 500,
+      candidates: [],
+      eventBaskets: []
+    });
+    expect(summarizeAudit(findings).ok).toBe(true);
+  });
+
+  it("rejects executable labels without positive depth-backed economics", () => {
+    const findings = auditScanResult({
+      generatedAt: new Date().toISOString(),
+      maxMinutes: 120,
+      totalActiveMarketsScanned: 100,
+      totalInWindowBeforeFilters: 1,
+      returned: 1,
+      candidates: [{
+        id: "1",
+        slug: "test",
+        question: "Test?",
+        conditionId: "condition",
+        endDate: new Date(Date.now() + 60_000).toISOString(),
+        minutesRemaining: 1,
+        acceptingOrders: true,
+        liquidityUsd: 1000,
+        volumeUsd: 1000,
+        volume24hUsd: 100,
+        outcomes: ["Yes","No"],
+        tokenIds: ["yes","no"],
+        displayedOutcomePrices: [0.5,0.5],
+        resolutionSource: null,
+        resolutionRules: null,
+        url: null,
+        binaryArbitrage: null,
+        opportunityClass: "executable_structural",
+        opportunityScore: 80,
+        rapidReviewScore: 70,
+        scoreBreakdown: {},
+        flags: []
+      }]
+    });
+    const executionCheck = findings.find(f => f.id === "executable_edge_integrity");
+    expect(executionCheck?.ok).toBe(false);
+    expect(summarizeAudit(findings).ok).toBe(false);
   });
 });
