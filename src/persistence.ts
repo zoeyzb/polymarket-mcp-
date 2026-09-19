@@ -224,8 +224,86 @@ export async function getCalibrationStats() {
     ...row,
     coverageHours: first !== null && last !== null ? numberOrNull(((last - first) / 3_600_000).toFixed(3)) : null,
     classes: classes.rows,
-    topPersistentMarkets: top.rows
+    topPersistentMarkets: top.rows,
+    resolvedMarkets: Number((await pool.query("select count(*)::int as count from polymarket_brain.resolutions")).rows[0]?.count || 0)
   };
+}
+
+export async function getUnresolvedObservedMarkets(limit = 100) {
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `select distinct on (c.condition_id)
+       c.condition_id as "conditionId",
+       c.market_id as "marketId",
+       c.slug,
+       c.question,
+       c.end_date as "endDate"
+     from polymarket_brain.candidates c
+     left join polymarket_brain.resolutions r on r.condition_id = c.condition_id
+     where c.condition_id is not null
+       and c.slug is not null
+       and c.end_date is not null
+       and c.end_date <= now()
+       and r.condition_id is null
+     order by c.condition_id, c.generated_at desc
+     limit $1`,
+    [Math.max(1, Math.min(500, limit))]
+  );
+  return rows as Array<{
+    conditionId: string;
+    marketId: string | null;
+    slug: string;
+    question: string;
+    endDate: string;
+  }>;
+}
+
+export async function recordResolution(input: {
+  conditionId: string;
+  marketId?: string | null;
+  resolvedAt?: string | null;
+  winningOutcome: string;
+  winningTokenId?: string | null;
+  source: string;
+  payload: unknown;
+}) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  await pool.query(
+    `insert into polymarket_brain.resolutions (
+       condition_id, market_id, resolved_at, winning_outcome,
+       winning_token_id, source, payload, updated_at
+     ) values ($1,$2,$3,$4,$5,$6,$7::jsonb,now())
+     on conflict (condition_id) do update set
+       market_id = excluded.market_id,
+       resolved_at = excluded.resolved_at,
+       winning_outcome = excluded.winning_outcome,
+       winning_token_id = excluded.winning_token_id,
+       source = excluded.source,
+       payload = excluded.payload,
+       updated_at = now()`,
+    [
+      input.conditionId,
+      input.marketId ?? null,
+      input.resolvedAt ?? new Date().toISOString(),
+      input.winningOutcome,
+      input.winningTokenId ?? null,
+      input.source,
+      JSON.stringify(input.payload)
+    ]
+  );
+  return { configured: true, ok: true };
+}
+
+export async function getResolutionStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      count(*)::int as "resolvedMarkets",
+      min(resolved_at) as "firstResolvedAt",
+      max(resolved_at) as "lastResolvedAt"
+    from polymarket_brain.resolutions
+  `);
+  return { configured: true, ...rows[0] };
 }
 
 export async function testPersistenceConnection() {
