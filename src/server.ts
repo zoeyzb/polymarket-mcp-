@@ -18,7 +18,7 @@ import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scann
 import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
-import { getCalibrationStats, getPersistentStats, persistScan, persistenceConfig } from "./persistence.js";
+import { getCalibrationStats, getPersistentStats, persistScan, persistenceConfig, testPersistenceConnection } from "./persistence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -240,6 +240,7 @@ export function createMcpServer() {
     },
     async () => textResult({
       config: persistenceConfig(),
+      connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
       stats: await getPersistentStats().catch(error => ({
         error: errorMessage(error)
       }))
@@ -338,6 +339,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   if (url.pathname === "/api/persistence-health") {
     json(res, 200, {
       config: persistenceConfig(),
+      connection: await testPersistenceConnection().catch(error => ({ error: errorMessage(error) })),
       stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
