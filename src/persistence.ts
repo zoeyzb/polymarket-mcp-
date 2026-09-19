@@ -3,6 +3,7 @@ import type { ScanResult } from "./types.js";
 import type { RealtimeQuote } from "./realtime.js";
 import type { SportsFeedEvent } from "./sports.js";
 import type { HistoricalCalibrationSample } from "./historical-calibration.js";
+import { isPoliticalCandidate } from "./domain-policy.js";
 
 const { Pool } = pg;
 
@@ -353,6 +354,7 @@ type AlertSpec = {
 
 function alertsForCandidate(candidate: ScanResult["candidates"][number]): AlertSpec[] {
   const alerts: AlertSpec[] = [];
+  const politicalStructuralOnly = isPoliticalCandidate(candidate);
 
   if (candidate.opportunityClass === "executable_structural") {
     alerts.push({
@@ -381,6 +383,8 @@ function alertsForCandidate(candidate: ScanResult["candidates"][number]): AlertS
     large_recent_trade: { alertType: "large_recent_trade", severity: "medium" },
     external_source_divergence: { alertType: "external_source_divergence", severity: "low" }
   };
+
+  if (politicalStructuralOnly) return alerts;
 
   for (const flag of candidate.flags || []) {
     const mapped = flagMap[flag];
