@@ -30,6 +30,7 @@ import {
   testPersistenceConnection
 } from "./persistence.js";
 import { inferFinalResolution } from "./resolutions.js";
+import { getExternalCryptoEvidence } from "./external-evidence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -144,6 +145,20 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.external_evidence",
+    {
+      description: "For supported short-dated crypto threshold questions, cross-check independent Coinbase and Kraken public spot data and report threshold distance/source divergence. Descriptive only; no win probability or outcome recommendation.",
+      inputSchema: {
+        question: z.string().min(1)
+      }
+    },
+    async input => textResult({
+      question: input.question,
+      evidence: await getExternalCryptoEvidence(input.question)
+    })
+  );
+
+  server.registerTool(
     "markets.research_packet",
     {
       description: "Build one read-only research packet for a Polymarket market: resolution rules/source, live CLOB books, price regimes, recent trade flow, and durable prior observations. Descriptive only; it does not choose or recommend an outcome.",
@@ -208,6 +223,7 @@ export function createMcpServer() {
         priceRegimes: history,
         tradeFlow: analyzeTradeFlowPayload(trades),
         historicalEvidence: historical,
+        independentExternalEvidence: await getExternalCryptoEvidence(String(market.question || "")).catch(() => null),
         externalEvidenceNeeded: [
           "Verify the event state using current primary or authoritative sources.",
           "Check the exact resolution wording and source before interpreting evidence.",
