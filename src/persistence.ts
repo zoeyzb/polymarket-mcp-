@@ -485,6 +485,22 @@ export async function getAlertStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function getKnownHistoricalCalibrationIds(conditionIds: string[]) {
+  const known = new Set<string>();
+  if (!pool || conditionIds.length === 0) return known;
+
+  const unique = [...new Set(conditionIds.filter(Boolean))].slice(0, 2000);
+  const { rows } = await pool.query(
+    `select condition_id
+     from polymarket_brain.historical_calibration
+     where condition_id = any($1::text[])`,
+    [unique]
+  );
+
+  for (const row of rows) known.add(String(row.condition_id));
+  return known;
+}
+
 export async function upsertHistoricalCalibrationSample(sample: HistoricalCalibrationSample) {
   if (!pool) return { configured: false, reason: "not_configured", upserted: 0 };
 
