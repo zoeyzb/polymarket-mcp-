@@ -2,18 +2,24 @@ import type { GammaMarket, NormalizedBook, OrderBook, OrderLevel } from "./types
 
 const GAMMA_BASE = process.env.GAMMA_API_BASE || "https://gamma-api.polymarket.com";
 const CLOB_BASE = process.env.CLOB_API_BASE || "https://clob.polymarket.com";
-
 const DEFAULT_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 10000);
 
-async function fetchJson<T>(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+async function fetchJson<T>(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
+      ...init,
       signal: controller.signal,
       headers: {
-        "user-agent": "zoey-polymarket-mcp/0.1",
-        accept: "application/json"
+        "user-agent": "zoey-polymarket-mcp/0.2",
+        accept: "application/json",
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...(init.headers || {})
       }
     });
     if (!response.ok) {
@@ -48,7 +54,7 @@ export function parseNumberArray(value: unknown): number[] {
 let activeMarketCache: { at: number; markets: GammaMarket[] } | null = null;
 const ACTIVE_CACHE_MS = Math.max(0, Number(process.env.ACTIVE_MARKET_CACHE_MS || 15000));
 
-export async function listAllActiveMarkets(maxPages = 250, pageSize = 100): Promise<GammaMarket[]> {
+export async function listAllActiveMarkets(maxPages = 250, pageSize = 500): Promise<GammaMarket[]> {
   if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
     return activeMarketCache.markets;
   }
@@ -84,7 +90,7 @@ export async function listActiveMarketsEndingBetween(
   start: Date,
   end: Date,
   maxPages = 25,
-  pageSize = 100
+  pageSize = 500
 ): Promise<GammaMarket[]> {
   const byKey = new Map<string, GammaMarket>();
 
@@ -153,9 +159,8 @@ function normalizeLevels(levels: OrderLevel[] | undefined, direction: "bid" | "a
   return normalized;
 }
 
-export async function getOrderBook(tokenId: string): Promise<NormalizedBook> {
-  const params = new URLSearchParams({ token_id: tokenId });
-  const raw = await fetchJson<OrderBook>(`${CLOB_BASE}/book?${params}`);
+function normalizeBook(raw: OrderBook, fallbackTokenId?: string): NormalizedBook {
+  const tokenId = String(raw.asset_id || fallbackTokenId || "");
   const bids = normalizeLevels(raw.bids, "bid");
   const asks = normalizeLevels(raw.asks, "ask");
   const bestBid = bids[0]?.price ?? null;
@@ -165,6 +170,45 @@ export async function getOrderBook(tokenId: string): Promise<NormalizedBook> {
   const bidDepthUsdTop5 = bids.slice(0, 5).reduce((sum, l) => sum + l.price * l.size, 0);
   const askDepthUsdTop5 = asks.slice(0, 5).reduce((sum, l) => sum + l.price * l.size, 0);
   return { tokenId, bestBid, bestAsk, spread, midpoint, bidDepthUsdTop5, askDepthUsdTop5, raw };
+}
+
+export async function getOrderBook(tokenId: string): Promise<NormalizedBook> {
+  const params = new URLSearchParams({ token_id: tokenId });
+  const raw = await fetchJson<OrderBook>(`${CLOB_BASE}/book?${params}`);
+  return normalizeBook(raw, tokenId);
+}
+
+export async function getOrderBooks(tokenIds: string[]): Promise<Map<string, NormalizedBook>> {
+  const unique = [...new Set(tokenIds.filter(Boolean))];
+  const out = new Map<string, NormalizedBook>();
+  const chunkSize = 500;
+
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    try {
+      const raws = await fetchJson<OrderBook[]>(
+        `${CLOB_BASE}/books`,
+        {
+          method: "POST",
+          body: JSON.stringify(chunk.map(token_id => ({ token_id })))
+        },
+        Math.max(DEFAULT_TIMEOUT_MS, 20000)
+      );
+
+      if (!Array.isArray(raws)) throw new Error("CLOB /books returned a non-array payload");
+      raws.forEach((raw, index) => {
+        const normalized = normalizeBook(raw, chunk[index]);
+        if (normalized.tokenId) out.set(normalized.tokenId, normalized);
+      });
+    } catch {
+      const fallback = await Promise.all(chunk.map(async tokenId => {
+        try { return await getOrderBook(tokenId); } catch { return null; }
+      }));
+      for (const book of fallback) if (book) out.set(book.tokenId, book);
+    }
+  }
+
+  return out;
 }
 
 export async function getPriceHistory(tokenId: string, hours = 6, fidelityMinutes = 1): Promise<unknown> {
@@ -187,6 +231,7 @@ export async function upstreamCheck(): Promise<Record<string, unknown>> {
   const market = markets?.[0] ?? null;
   const tokenIds = market ? parseStringArray(market.clobTokenIds) : [];
   let clob: Record<string, unknown> = { ok: false, reason: "no token available" };
+
   if (tokenIds[0]) {
     const clobStarted = Date.now();
     try {
@@ -202,6 +247,7 @@ export async function upstreamCheck(): Promise<Record<string, unknown>> {
       clob = { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
+
   return {
     ok: true,
     gamma: {
