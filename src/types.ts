@@ -11,6 +11,8 @@ export interface GammaMarket {
   closed?: boolean;
   acceptingOrders?: boolean;
   negRisk?: boolean;
+  enableNegRisk?: boolean;
+  negRiskAugmented?: boolean;
   liquidity?: string | number;
   liquidityNum?: number;
   volume?: string | number;
