@@ -150,11 +150,9 @@ export async function getExternalCryptoEvidence(question: string): Promise<Exter
     krakenQuote(spec.krakenPair)
   ]);
 
-  const sources = settled
-    .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof coinbaseQuote>> | Awaited<ReturnType<typeof krakenQuote>>> =>
-      result.status === "fulfilled"
-    )
-    .map(result => result.value);
+  const sources = settled.flatMap(result =>
+    result.status === "fulfilled" ? [result.value] : []
+  );
 
   if (!sources.length) return null;
 
