@@ -12,9 +12,10 @@ import {
   searchActiveMarkets,
   upstreamCheck
 } from "./polymarket.js";
-import { scanBinaryArbitrage, scanClosingSoon } from "./scanner.js";
+import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
 
 const PORT = Number(process.env.PORT || 3000);
+const VERSION = "0.2.0";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
@@ -34,37 +35,51 @@ function errorMessage(error: unknown) {
 }
 
 export function createMcpServer() {
-  const server = new McpServer({
-    name: "zoey-polymarket-mcp",
-    version: "0.1.0"
-  });
+  const server = new McpServer({ name: "zoey-polymarket-mcp", version: VERSION });
 
   server.registerTool(
     "markets.scan_closing_soon",
     {
-      description: "Scan the entire active Polymarket market universe, then return markets that are accepting orders and end within at most 120 minutes. Optionally enrich every result with live CLOB order books, executable payout estimates, structural-arbitrage flags, and a rapid-review score. The score measures tradability/review quality, NOT probability of winning.",
+      description: "Scan all active Polymarket markets ending within at most 120 minutes. Uses live CLOB order books and can sort by executable opportunity, tradability, liquidity, or closing time. The opportunity score is market-structure based, not a prediction of which outcome will win.",
       inputSchema: {
         maxMinutes: z.number().int().min(1).max(120).default(120),
         minLiquidity: z.number().min(0).default(0),
         includeOrderBooks: z.boolean().default(true),
         limit: z.number().int().min(1).max(500).default(100),
         offset: z.number().int().min(0).default(0),
-        sort: z.enum(["soonest", "review_score", "liquidity"]).default("soonest")
+        sort: z.enum(["soonest", "review_score", "liquidity", "opportunity"]).default("opportunity"),
+        bufferBps: z.number().min(0).max(1000).default(50)
       }
     },
     async input => textResult(await scanClosingSoon(input))
   );
 
   server.registerTool(
-    "markets.arbitrage_closing_soon",
+    "markets.scan_opportunities",
     {
-      description: "Scan all active markets ending within at most 120 minutes and flag binary markets where the live YES ask plus NO ask is below $1. This is only a structural signal; simultaneous fills, fees, slippage, and resolution risk must be checked before treating it as executable.",
+      description: "Return the strongest market-structure opportunities among all active markets ending within at most 120 minutes. Executable structural opportunities are depth-tested at $10/$25/$50/$100 and include a configurable execution buffer. Research candidates are tradable markets, not directional recommendations.",
       inputSchema: {
         maxMinutes: z.number().int().min(1).max(120).default(120),
-        limit: z.number().int().min(1).max(200).default(50)
+        minLiquidity: z.number().min(0).default(0),
+        minOpportunityScore: z.number().min(0).max(100).default(35),
+        limit: z.number().int().min(1).max(200).default(50),
+        bufferBps: z.number().min(0).max(1000).default(50)
       }
     },
-    async input => textResult(await scanBinaryArbitrage(input.maxMinutes, input.limit))
+    async input => textResult(await scanOpportunities(input))
+  );
+
+  server.registerTool(
+    "markets.arbitrage_closing_soon",
+    {
+      description: "Scan all active markets ending within at most 120 minutes and return only binary complete-set edges that remain positive after walking real order-book depth and applying an execution buffer.",
+      inputSchema: {
+        maxMinutes: z.number().int().min(1).max(120).default(120),
+        limit: z.number().int().min(1).max(200).default(50),
+        bufferBps: z.number().min(0).max(1000).default(50)
+      }
+    },
+    async input => textResult(await scanBinaryArbitrage(input.maxMinutes, input.limit, input.bufferBps))
   );
 
   server.registerTool(
@@ -125,9 +140,7 @@ export function createMcpServer() {
 
   server.registerTool(
     "system.upstream_check",
-    {
-      description: "Verify live access to Polymarket Gamma and CLOB public APIs and return sample latency/top-of-book data."
-    },
+    { description: "Verify live access to Polymarket Gamma and CLOB public APIs and return sample latency/top-of-book data." },
     async () => textResult(await upstreamCheck())
   );
 
@@ -145,16 +158,11 @@ function normalizeAccept(req: IncomingMessage) {
   const accept = req.headers.accept || "";
   if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
     req.headers.accept = "application/json, text/event-stream";
-    const raw = req.rawHeaders;
-    let found = false;
-    for (let i = 0; i < raw.length; i += 2) {
-      if (raw[i]?.toLowerCase() === "accept") {
-        raw[i + 1] = "application/json, text/event-stream";
-        found = true;
-      }
-    }
-    if (!found) raw.push("Accept", "application/json, text/event-stream");
   }
+}
+
+function numberParam(url: URL, name: string, fallback: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Number(url.searchParams.get(name) || fallback)));
 }
 
 async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
@@ -164,7 +172,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     json(res, 200, {
       status: "ok",
       service: "zoey-polymarket-mcp",
-      version: "0.1.0",
+      version: VERSION,
       mode: "read-only",
       maxScannerWindowMinutes: 120,
       now: new Date().toISOString()
@@ -178,26 +186,38 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   }
 
   if (url.pathname === "/api/closing-soon") {
-    const minutes = Math.min(120, Math.max(1, Number(url.searchParams.get("minutes") || 120)));
-    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 50)));
-    const minLiquidity = Math.max(0, Number(url.searchParams.get("minLiquidity") || 0));
-    const books = url.searchParams.get("books") !== "false";
     const sortParam = url.searchParams.get("sort");
-    const sort = sortParam === "review_score" || sortParam === "liquidity" ? sortParam : "soonest";
+    const sort = sortParam === "review_score" || sortParam === "liquidity" || sortParam === "opportunity"
+      ? sortParam
+      : "soonest";
     json(res, 200, await scanClosingSoon({
-      maxMinutes: minutes,
-      limit,
-      minLiquidity,
-      includeOrderBooks: books,
-      sort
+      maxMinutes: numberParam(url, "minutes", 120, 1, 120),
+      limit: numberParam(url, "limit", 50, 1, 500),
+      minLiquidity: Math.max(0, Number(url.searchParams.get("minLiquidity") || 0)),
+      includeOrderBooks: url.searchParams.get("books") !== "false",
+      sort,
+      bufferBps: numberParam(url, "bufferBps", 50, 0, 1000)
+    }));
+    return true;
+  }
+
+  if (url.pathname === "/api/opportunities") {
+    json(res, 200, await scanOpportunities({
+      maxMinutes: numberParam(url, "minutes", 120, 1, 120),
+      limit: numberParam(url, "limit", 50, 1, 200),
+      minLiquidity: Math.max(0, Number(url.searchParams.get("minLiquidity") || 0)),
+      minOpportunityScore: numberParam(url, "minScore", 35, 0, 100),
+      bufferBps: numberParam(url, "bufferBps", 50, 0, 1000)
     }));
     return true;
   }
 
   if (url.pathname === "/api/arbitrage") {
-    const minutes = Math.min(120, Math.max(1, Number(url.searchParams.get("minutes") || 120)));
-    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 50)));
-    json(res, 200, await scanBinaryArbitrage(minutes, limit));
+    json(res, 200, await scanBinaryArbitrage(
+      numberParam(url, "minutes", 120, 1, 120),
+      numberParam(url, "limit", 50, 1, 200),
+      numberParam(url, "bufferBps", 50, 0, 1000)
+    ));
     return true;
   }
 
@@ -212,8 +232,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   if (url.pathname === "/.well-known/mcp/server-card.json") {
     json(res, 200, {
       name: "Zoey Polymarket MCP",
-      version: "0.1.0",
-      description: "Read-only Polymarket full-universe scanner with two-hour closing window and CLOB enrichment.",
+      version: VERSION,
+      description: "Read-only Polymarket full-universe two-hour opportunity scanner with depth-aware CLOB execution math.",
       transport: { type: "streamable-http", url: "/mcp" },
       capabilities: ["tools"],
       readOnly: true
@@ -224,11 +244,13 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   if (url.pathname === "/") {
     json(res, 200, {
       name: "zoey-polymarket-mcp",
-      version: "0.1.0",
+      version: VERSION,
       mode: "read-only",
       mcp: "/mcp",
       health: "/health",
-      scan: "/api/closing-soon?minutes=120&limit=50&books=true",
+      opportunities: "/api/opportunities?minutes=120&limit=50",
+      scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
+      arbitrage: "/api/arbitrage?minutes=120&limit=50",
       upstream: "/api/upstream-check"
     });
     return true;
@@ -279,6 +301,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(JSON.stringify({
     level: "info",
     message: "Polymarket MCP listening",
+    version: VERSION,
     port: PORT,
     mode: "read-only",
     mcp: "/mcp",
@@ -286,22 +309,18 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   }));
 
   upstreamCheck()
-    .then(result => {
-      console.log(JSON.stringify({
-        level: "info",
-        message: "upstream_self_test",
-        result,
-        at: new Date().toISOString()
-      }));
-    })
-    .catch(error => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "upstream_self_test_failed",
-        error: errorMessage(error),
-        at: new Date().toISOString()
-      }));
-    });
+    .then(result => console.log(JSON.stringify({
+      level: "info",
+      message: "upstream_self_test",
+      result,
+      at: new Date().toISOString()
+    })))
+    .catch(error => console.error(JSON.stringify({
+      level: "error",
+      message: "upstream_self_test_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    })));
 });
 
 function shutdown(signal: string) {
