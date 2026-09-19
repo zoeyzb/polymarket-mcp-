@@ -125,6 +125,16 @@ export interface ScanCandidate {
     priceRegime: import("./intelligence.js").PriceRegimeAnalysis | null;
     tradeFlow: import("./intelligence.js").TradeFlowAnalysis | null;
   };
+  historicalEvidence?: {
+    observations: number;
+    executableObservations: number;
+    avgOpportunityScore: number | null;
+    maxOpportunityScore: number | null;
+    avgAttentionScore: number | null;
+    firstSeen: string | null;
+    lastSeen: string | null;
+    persistenceBoost: number;
+  };
   rapidReviewScore: number;
   scoreBreakdown: Record<string, number>;
   flags: string[];
