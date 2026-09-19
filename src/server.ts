@@ -2,6 +2,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import {
   getMarketBySlug,
@@ -53,6 +55,67 @@ function textResult(value: unknown) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function runMcpSelfTest() {
+  const endpoint = new URL(`http://127.0.0.1:${PORT}/mcp`);
+  const client = new Client({
+    name: "zoey-polymarket-self-test",
+    version: VERSION
+  });
+  const transport = new StreamableHTTPClientTransport(endpoint);
+  const started = Date.now();
+  const timeoutMs = Math.max(1000, Number(process.env.MCP_SELF_TEST_TIMEOUT_MS || 8000));
+
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    await Promise.race([
+      (async () => {
+        await client.connect(transport);
+        const result = await client.listTools();
+        const names = result.tools.map(tool => tool.name).sort();
+        return {
+          ok: true,
+          endpoint: "/mcp",
+          transport: "streamable-http",
+          toolCount: names.length,
+          tools: names,
+          latencyMs: Date.now() - started
+        };
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("mcp_self_test_timeout")), timeoutMs);
+      })
+    ]).then(result => result as {
+      ok: true;
+      endpoint: string;
+      transport: string;
+      toolCount: number;
+      tools: string[];
+      latencyMs: number;
+    });
+    const listed = await client.listTools();
+    const names = listed.tools.map(tool => tool.name).sort();
+    return {
+      ok: true,
+      endpoint: "/mcp",
+      transport: "streamable-http",
+      toolCount: names.length,
+      tools: names,
+      latencyMs: Date.now() - started
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      endpoint: "/mcp",
+      transport: "streamable-http",
+      latencyMs: Date.now() - started,
+      error: errorMessage(error)
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    await client.close().catch(() => {});
+  }
 }
 
 async function runSystemAudit() {
@@ -120,6 +183,14 @@ async function runSystemAudit() {
     ok: !Number.isFinite(recentInterval) || (recentInterval >= 20 && recentInterval <= 45),
     severity: "warning",
     detail: `recentAvgIntervalSeconds=${integrity.recentAvgIntervalSeconds ?? "unknown"}`
+  });
+
+  const mcpSelfTest = await runMcpSelfTest();
+  findings.push({
+    id: "mcp_transport_handshake",
+    ok: mcpSelfTest.ok === true && Number((mcpSelfTest as any).toolCount || 0) > 0,
+    severity: "critical",
+    detail: JSON.stringify(mcpSelfTest)
   });
 
   const realtime = realtimeTracker.getHealth();
@@ -448,6 +519,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.mcp_self_test",
+    {
+      description: "Perform an actual local Streamable HTTP MCP initialize + tools/list handshake against this service's /mcp endpoint."
+    },
+    async () => textResult(await runMcpSelfTest())
+  );
+
+  server.registerTool(
     "system.persistence_health",
     {
       description: "Return durable Polymarket history backend status and aggregate stored scan statistics."
@@ -571,6 +650,12 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/mcp-self-test") {
+    const result = await runMcpSelfTest();
+    json(res, result.ok ? 200 : 503, result);
+    return true;
+  }
+
   if (url.pathname === "/api/persistence-health") {
     json(res, 200, {
       config: persistenceConfig(),
@@ -666,6 +751,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
       audit: "/api/audit",
+      mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
       calibration: "/api/calibration",
       resolutionHistory: "/api/resolution-history"
