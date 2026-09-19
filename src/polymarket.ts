@@ -178,6 +178,18 @@ export async function listClosedMarketsEndingBetween(
   return [...byKey.values()];
 }
 
+export async function getEventById(eventId: string): Promise<Record<string, unknown> | null> {
+  if (!eventId) return null;
+  try {
+    const event = await fetchJson<Record<string, unknown>>(
+      `${GAMMA_BASE}/events/${encodeURIComponent(eventId)}`
+    );
+    return event && typeof event === "object" ? event : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
   const params = new URLSearchParams({ slug });
   const markets = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
