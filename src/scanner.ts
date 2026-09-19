@@ -1,6 +1,6 @@
 import {
   getOrderBooks,
-  listActiveMarketsEndingBetween,
+  listAllActiveMarkets,
   parseNumberArray,
   parseStringArray
 } from "./polymarket.js";
@@ -356,7 +356,7 @@ export async function scanClosingSoon(options?: {
   const now = started;
   const cutoff = now + maxMinutes * 60000;
 
-  const all = await listActiveMarketsEndingBetween(new Date(now), new Date(cutoff));
+  const all = await listAllActiveMarkets();
   const inWindow = all
     .filter(m => {
       const endDate = getEndDate(m);
