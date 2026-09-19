@@ -125,6 +125,7 @@ export interface ScanCandidate {
     priceRegime: import("./intelligence.js").PriceRegimeAnalysis | null;
     tradeFlow: import("./intelligence.js").TradeFlowAnalysis | null;
   };
+  externalEvidence?: import("./external-evidence.js").ExternalCryptoEvidence | null;
   historicalEvidence?: {
     observations: number;
     executableObservations: number;
