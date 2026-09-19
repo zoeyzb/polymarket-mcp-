@@ -284,6 +284,24 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     mcp: "/mcp",
     at: new Date().toISOString()
   }));
+
+  upstreamCheck()
+    .then(result => {
+      console.log(JSON.stringify({
+        level: "info",
+        message: "upstream_self_test",
+        result,
+        at: new Date().toISOString()
+      }));
+    })
+    .catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "upstream_self_test_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      }));
+    });
 });
 
 function shutdown(signal: string) {
