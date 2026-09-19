@@ -8,13 +8,14 @@ import {
   getOrderBook,
   getOrderBooks,
   getPriceHistory,
+  getRecentTrades,
   parseNumberArray,
   parseStringArray,
   searchActiveMarkets,
   upstreamCheck
 } from "./polymarket.js";
 import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
-import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
+import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
 import type { NormalizedBook } from "./types.js";
@@ -128,6 +129,24 @@ export function createMcpServer() {
       inputSchema: { tokenId: z.string().min(1) }
     },
     async input => textResult(await getOrderBook(input.tokenId))
+  );
+
+  server.registerTool(
+    "markets.trade_flow",
+    {
+      description: "Analyze recent public Data API trades for one market condition ID: notional flow, imbalance, largest trade, recent activity, and a flow-attention score. This is descriptive market behavior, not a winner prediction.",
+      inputSchema: {
+        conditionId: z.string().min(1),
+        limit: z.number().int().min(1).max(500).default(100)
+      }
+    },
+    async input => {
+      const trades = await getRecentTrades(input.conditionId, input.limit);
+      return textResult({
+        conditionId: input.conditionId,
+        analysis: analyzeTradeFlowPayload(trades)
+      });
+    }
   );
 
   server.registerTool(
