@@ -400,6 +400,91 @@ export async function getMaintenanceStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function replaceRealtimeTargets(
+  tokenIds: string[],
+  source = "multi_horizon_scanner",
+  ttlSeconds = 180
+) {
+  if (!pool) return { configured: false, reason: "not_configured", targets: 0 };
+
+  const unique = [...new Set(tokenIds.filter(Boolean))].slice(0, 10000);
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      `delete from polymarket_brain.realtime_targets where source = $1`,
+      [source]
+    );
+
+    if (unique.length) {
+      const payload = unique.map(tokenId => ({
+        token_id: tokenId,
+        source,
+        desired_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + Math.max(60, ttlSeconds) * 1000).toISOString(),
+        metadata: {}
+      }));
+      await client.query(
+        `insert into polymarket_brain.realtime_targets (
+           token_id, source, desired_at, expires_at, metadata
+         )
+         select
+           x.token_id,
+           x.source,
+           x.desired_at::timestamptz,
+           x.expires_at::timestamptz,
+           x.metadata
+         from jsonb_to_recordset($1::jsonb) as x(
+           token_id text,
+           source text,
+           desired_at text,
+           expires_at text,
+           metadata jsonb
+         )
+         on conflict (token_id) do update set
+           source = excluded.source,
+           desired_at = excluded.desired_at,
+           expires_at = excluded.expires_at,
+           metadata = excluded.metadata`,
+        [JSON.stringify(payload)]
+      );
+    }
+
+    await client.query("commit");
+    return { configured: true, targets: unique.length, source };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getRealtimeTargets() {
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `select token_id
+     from polymarket_brain.realtime_targets
+     where expires_at > now()
+     order by token_id`
+  );
+  return rows.map(row => String(row.token_id));
+}
+
+export async function getRealtimeTargetStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      count(*) filter (where expires_at > now())::int as "activeTargets",
+      count(*)::int as "storedTargets",
+      min(desired_at) filter (where expires_at > now()) as "oldestDesiredAt",
+      max(desired_at) filter (where expires_at > now()) as "newestDesiredAt",
+      max(expires_at) filter (where expires_at > now()) as "latestExpiry"
+    from polymarket_brain.realtime_targets
+  `);
+  return { configured: true, ...rows[0] };
+}
+
 export async function getStreamPersistenceStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
