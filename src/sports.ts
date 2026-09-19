@@ -32,6 +32,7 @@ class SportsTracker {
   private reconnect: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
   private events: SportsFeedEvent[] = [];
+  private pendingEvents: SportsFeedEvent[] = [];
   private messageCount = 0;
   private sportResultCount = 0;
   private lastConnectedAt: string | null = null;
@@ -85,10 +86,16 @@ class SportsTracker {
           if (type !== "sport_result") continue;
 
           this.sportResultCount += 1;
-          this.events.push({
+          const event = {
             receivedAt: new Date().toISOString(),
             payload: message as Record<string, unknown>
-          });
+          };
+          this.events.push(event);
+          this.pendingEvents.push(event);
+
+          if (this.pendingEvents.length > MAX_EVENTS * 2) {
+            this.pendingEvents.splice(0, this.pendingEvents.length - MAX_EVENTS * 2);
+          }
 
           if (this.events.length > MAX_EVENTS) {
             this.events.splice(0, this.events.length - MAX_EVENTS);
@@ -144,6 +151,11 @@ class SportsTracker {
 
   recent(limit = 50) {
     return this.events.slice(-Math.max(1, Math.min(MAX_EVENTS, limit))).reverse();
+  }
+
+  drainPendingEvents(limit = 500) {
+    const count = Math.max(1, Math.min(MAX_EVENTS * 2, limit));
+    return this.pendingEvents.splice(0, count);
   }
 
   matchQuestion(question: string, limit = 10) {
