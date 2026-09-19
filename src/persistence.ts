@@ -215,7 +215,8 @@ export async function persistRealtimeQuotes(quotes: RealtimeQuote[]) {
        last_trade_side text,
        event_type text,
        payload jsonb
-     )`,
+     )
+     on conflict (token_id, observed_at) do nothing`,
     [JSON.stringify(payload)]
   );
 
