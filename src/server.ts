@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   getMarketBySlug,
   getOrderBook,
+  getOrderBooks,
   getPriceHistory,
   parseNumberArray,
   parseStringArray,
@@ -13,9 +14,11 @@ import {
   upstreamCheck
 } from "./polymarket.js";
 import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
+import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
+import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, {
@@ -126,6 +129,77 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.price_regime",
+    {
+      description: "Analyze a token's recent Polymarket price path for trend, volatility, shock behavior, and anomaly score. This describes market behavior only; it is not a directional recommendation.",
+      inputSchema: {
+        tokenId: z.string().min(1),
+        hours: z.number().int().min(1).max(168).default(6),
+        fidelityMinutes: z.number().int().min(1).max(60).default(1)
+      }
+    },
+    async input => {
+      const history = await getPriceHistory(input.tokenId, input.hours, input.fidelityMinutes);
+      return textResult({
+        tokenId: input.tokenId,
+        hours: input.hours,
+        fidelityMinutes: input.fidelityMinutes,
+        analysis: analyzePriceHistoryPayload(history)
+      });
+    }
+  );
+
+  server.registerTool(
+    "markets.complete_outcome_basket",
+    {
+      description: "Depth-test a caller-supplied mutually-exclusive and collectively-exhaustive outcome-token basket. Only use token IDs that truly form one complete outcome set. Returns executable equal-share package economics after an execution buffer.",
+      inputSchema: {
+        tokenIds: z.array(z.string().min(1)).min(2).max(100),
+        budgetUsd: z.number().positive().max(100000).default(100),
+        bufferBps: z.number().min(0).max(1000).default(50)
+      }
+    },
+    async input => {
+      const books = await getOrderBooks(input.tokenIds);
+      const ordered = input.tokenIds
+        .map(tokenId => books.get(tokenId))
+        .filter((book): book is NonNullable<typeof book> => Boolean(book));
+      if (ordered.length !== input.tokenIds.length) {
+        return textResult({
+          ok: false,
+          reason: "missing_order_book",
+          requested: input.tokenIds.length,
+          loaded: ordered.length
+        });
+      }
+      return textResult({
+        ok: true,
+        assumption: "tokenIds are mutually exclusive and collectively exhaustive",
+        execution: calculateCompleteOutcomeBasket(ordered, input.budgetUsd, input.bufferBps)
+      });
+    }
+  );
+
+  server.registerTool(
+    "system.snapshot_health",
+    {
+      description: "Return rolling in-process scanner health and deltas across recent scans."
+    },
+    async () => textResult(getSnapshotHealth())
+  );
+
+  server.registerTool(
+    "system.snapshots",
+    {
+      description: "Return recent in-process opportunity scanner snapshots.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(100)
+      }
+    },
+    async input => textResult(getSnapshots(input.limit))
+  );
+
+  server.registerTool(
     "markets.price_history",
     {
       description: "Get CLOB price history for an outcome token ID.",
@@ -182,6 +256,16 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
 
   if (url.pathname === "/api/upstream-check") {
     json(res, 200, await upstreamCheck());
+    return true;
+  }
+
+  if (url.pathname === "/api/snapshot-health") {
+    json(res, 200, getSnapshotHealth());
+    return true;
+  }
+
+  if (url.pathname === "/api/snapshots") {
+    json(res, 200, getSnapshots(numberParam(url, "limit", 100, 1, 500)));
     return true;
   }
 
@@ -251,7 +335,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       opportunities: "/api/opportunities?minutes=120&limit=50",
       scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
       arbitrage: "/api/arbitrage?minutes=120&limit=50",
-      upstream: "/api/upstream-check"
+      upstream: "/api/upstream-check",
+      snapshotHealth: "/api/snapshot-health"
     });
     return true;
   }
@@ -297,6 +382,33 @@ const httpServer = createServer(async (req, res) => {
   }
 });
 
+let backgroundScanRunning = false;
+const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
+
+async function runBackgroundScan() {
+  if (backgroundScanRunning) return;
+  backgroundScanRunning = true;
+  try {
+    await scanClosingSoon({
+      maxMinutes: 120,
+      minLiquidity: 0,
+      includeOrderBooks: true,
+      limit: 500,
+      sort: "opportunity",
+      bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "background_scan_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    backgroundScanRunning = false;
+  }
+}
+
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(JSON.stringify({
     level: "info",
@@ -321,6 +433,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       error: errorMessage(error),
       at: new Date().toISOString()
     })));
+
+  runBackgroundScan().catch(() => {});
+  setInterval(() => {
+    runBackgroundScan().catch(() => {});
+  }, BACKGROUND_SCAN_SECONDS * 1000).unref();
 });
 
 function shutdown(signal: string) {
