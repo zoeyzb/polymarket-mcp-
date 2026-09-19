@@ -354,6 +354,45 @@ export async function getResolutionStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function getPersistenceIntegrity() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const { rows } = await pool.query(`
+    with ordered as (
+      select generated_at,
+             lag(generated_at) over (order by generated_at) as previous_at
+      from polymarket_brain.scans
+    ),
+    duplicate_groups as (
+      select generated_at, count(*) as copies
+      from polymarket_brain.scans
+      group by generated_at
+      having count(*) > 1
+    )
+    select
+      (select count(*)::int from polymarket_brain.scans) as "scanCount",
+      (select count(*)::int from duplicate_groups) as "duplicateTimestamps",
+      (select max(generated_at) from polymarket_brain.scans) as "lastScanAt",
+      (select round(avg(extract(epoch from (generated_at - previous_at)))::numeric,2)
+       from ordered where previous_at is not null) as "avgIntervalSeconds"
+  `);
+
+  const row = rows[0] || {};
+  const lastScanAt = row.lastScanAt ? new Date(row.lastScanAt).toISOString() : null;
+  const ageSeconds = lastScanAt
+    ? Math.max(0, (Date.now() - Date.parse(lastScanAt)) / 1000)
+    : null;
+
+  return {
+    configured: true,
+    scanCount: Number(row.scanCount || 0),
+    duplicateTimestamps: Number(row.duplicateTimestamps || 0),
+    lastScanAt,
+    ageSeconds: ageSeconds === null ? null : Number(ageSeconds.toFixed(2)),
+    avgIntervalSeconds: numberOrNull(row.avgIntervalSeconds)
+  };
+}
+
 export async function testPersistenceConnection() {
   if (!pool) return { configured: false, reason: "not_configured" };
   const started = Date.now();
