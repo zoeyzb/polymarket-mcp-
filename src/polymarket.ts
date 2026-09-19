@@ -80,6 +80,50 @@ export async function listAllActiveMarkets(maxPages = 250, pageSize = 100): Prom
   return markets;
 }
 
+export async function listActiveMarketsEndingBetween(
+  start: Date,
+  end: Date,
+  maxPages = 25,
+  pageSize = 100
+): Promise<GammaMarket[]> {
+  const byKey = new Map<string, GammaMarket>();
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * pageSize;
+    const params = new URLSearchParams({
+      active: "true",
+      closed: "false",
+      accepting_orders: "true",
+      end_date_min: start.toISOString(),
+      end_date_max: end.toISOString(),
+      order: "endDate",
+      ascending: "true",
+      limit: String(pageSize),
+      offset: String(offset)
+    });
+
+    let batch: GammaMarket[];
+    try {
+      batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (page > 0 && message.includes("422")) break;
+      throw error;
+    }
+
+    if (!Array.isArray(batch) || batch.length === 0) break;
+
+    for (const market of batch) {
+      const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
+      byKey.set(key, market);
+    }
+
+    if (batch.length < pageSize) break;
+  }
+
+  return [...byKey.values()];
+}
+
 export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
   const params = new URLSearchParams({ slug });
   const markets = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
