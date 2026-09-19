@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseNumberArray, parseStringArray } from "./polymarket.js";
 import { calculateCompleteSetExecution } from "./scanner.js";
+import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import type { NormalizedBook } from "./types.js";
 
 function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
@@ -60,5 +61,56 @@ describe("complete-set execution", () => {
 
     expect(result.fillComplete).toBe(false);
     expect(result.sharesEach).toBe(0);
+  });
+});
+
+
+describe("multi-outcome basket execution", () => {
+  it("finds a depth-backed complete-set edge across three outcomes", () => {
+    const a = book("a", [[0.25, 100]]);
+    const b = book("b", [[0.30, 100]]);
+    const c = book("c", [[0.35, 100]]);
+    const result = calculateCompleteOutcomeBasket([a, b, c], 90, 50);
+
+    expect(result.fillComplete).toBe(true);
+    expect(result.grossProfitUsd).toBeGreaterThan(9);
+    expect(result.netProfitUsd).toBeGreaterThan(8);
+    expect(result.netRoiPct).toBeGreaterThan(9);
+  });
+
+  it("rejects an incomplete complete-set basket", () => {
+    const a = book("a", [[0.25, 100]]);
+    const b = book("b", []);
+    const c = book("c", [[0.35, 100]]);
+    const result = calculateCompleteOutcomeBasket([a, b, c], 90, 50);
+    expect(result.fillComplete).toBe(false);
+  });
+});
+
+describe("price regime analysis", () => {
+  it("detects a shock move", () => {
+    const analysis = analyzePriceHistoryPayload({
+      history: [
+        { t: 1, p: 0.20 },
+        { t: 2, p: 0.21 },
+        { t: 3, p: 0.22 },
+        { t: 4, p: 0.36 }
+      ]
+    });
+    expect(analysis.regime).toBe("shock");
+    expect(analysis.anomalyScore).toBeGreaterThan(50);
+  });
+
+  it("classifies stable prices without overcalling an anomaly", () => {
+    const analysis = analyzePriceHistoryPayload({
+      history: [
+        { t: 1, p: 0.50 },
+        { t: 2, p: 0.501 },
+        { t: 3, p: 0.499 },
+        { t: 4, p: 0.502 }
+      ]
+    });
+    expect(analysis.regime).toBe("stable");
+    expect(analysis.anomalyScore).toBeLessThan(20);
   });
 });
