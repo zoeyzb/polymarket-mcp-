@@ -63,6 +63,104 @@ function executionEstimate(book: NormalizedBook, budgetUsd: number): ExecutionEs
   };
 }
 
+export function calculateCompleteSetExecution(
+  books: NormalizedBook[],
+  budgetUsd: number,
+  executionBufferBps = 50
+) {
+  if (books.length < 2 || budgetUsd <= 0) {
+    return {
+      fillComplete: false,
+      sharesEach: 0,
+      totalCost: 0,
+      grossPayout: 0,
+      grossProfit: 0,
+      executionBufferUsd: 0,
+      netProfitAfterBuffer: 0,
+      netRoiPct: 0
+    };
+  }
+
+  const asksByBook = books.map(book =>
+    (book.raw.asks || [])
+      .map(level => ({ price: n(level.price), size: n(level.size) }))
+      .filter(level => level.price > 0 && level.price <= 1 && level.size > 0)
+      .sort((a, b) => a.price - b.price)
+  );
+
+  if (asksByBook.some(levels => levels.length === 0)) {
+    return {
+      fillComplete: false,
+      sharesEach: 0,
+      totalCost: 0,
+      grossPayout: 0,
+      grossProfit: 0,
+      executionBufferUsd: 0,
+      netProfitAfterBuffer: 0,
+      netRoiPct: 0
+    };
+  }
+
+  const maxShares = Math.min(
+    ...asksByBook.map(levels => levels.reduce((sum, level) => sum + level.size, 0))
+  );
+
+  const costForShares = (levels: Array<{ price: number; size: number }>, shares: number) => {
+    let remaining = shares;
+    let cost = 0;
+    for (const level of levels) {
+      if (remaining <= 0) break;
+      const take = Math.min(remaining, level.size);
+      cost += take * level.price;
+      remaining -= take;
+    }
+    return remaining > 1e-9 ? Number.POSITIVE_INFINITY : cost;
+  };
+
+  const totalCostForShares = (shares: number) =>
+    asksByBook.reduce((sum, levels) => sum + costForShares(levels, shares), 0);
+
+  let low = 0;
+  let high = maxShares;
+  for (let i = 0; i < 60; i++) {
+    const mid = (low + high) / 2;
+    if (totalCostForShares(mid) <= budgetUsd) low = mid;
+    else high = mid;
+  }
+
+  const sharesEach = low;
+  const totalCost = totalCostForShares(sharesEach);
+  if (!Number.isFinite(totalCost) || sharesEach <= 1e-9) {
+    return {
+      fillComplete: false,
+      sharesEach: 0,
+      totalCost: 0,
+      grossPayout: 0,
+      grossProfit: 0,
+      executionBufferUsd: 0,
+      netProfitAfterBuffer: 0,
+      netRoiPct: 0
+    };
+  }
+
+  const grossPayout = sharesEach;
+  const grossProfit = grossPayout - totalCost;
+  const executionBufferUsd = totalCost * (Math.max(0, executionBufferBps) / 10000);
+  const netProfitAfterBuffer = grossProfit - executionBufferUsd;
+  const netRoiPct = totalCost > 0 ? (netProfitAfterBuffer / totalCost) * 100 : 0;
+
+  return {
+    fillComplete: true,
+    sharesEach: Number(sharesEach.toFixed(6)),
+    totalCost: Number(totalCost.toFixed(6)),
+    grossPayout: Number(grossPayout.toFixed(6)),
+    grossProfit: Number(grossProfit.toFixed(6)),
+    executionBufferUsd: Number(executionBufferUsd.toFixed(6)),
+    netProfitAfterBuffer: Number(netProfitAfterBuffer.toFixed(6)),
+    netRoiPct: Number(netRoiPct.toFixed(4))
+  };
+}
+
 function scoreCandidate(
   market: GammaMarket,
   minutesRemaining: number,
