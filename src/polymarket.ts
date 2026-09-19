@@ -1,0 +1,153 @@
+import type { GammaMarket, NormalizedBook, OrderBook, OrderLevel } from "./types.js";
+
+const GAMMA_BASE = process.env.GAMMA_API_BASE || "https://gamma-api.polymarket.com";
+const CLOB_BASE = process.env.CLOB_API_BASE || "https://clob.polymarket.com";
+
+const DEFAULT_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 10000);
+
+async function fetchJson<T>(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "zoey-polymarket-mcp/0.1",
+        accept: "application/json"
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`Upstream ${response.status} ${response.statusText}: ${url}`);
+    }
+    return await response.json() as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function numberOf(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function parseStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return value.split(",").map(v => v.trim()).filter(Boolean);
+  }
+}
+
+export function parseNumberArray(value: unknown): number[] {
+  return parseStringArray(value).map(Number).filter(Number.isFinite);
+}
+
+export async function listAllActiveMarkets(maxPages = 40, pageSize = 500): Promise<GammaMarket[]> {
+  const output: GammaMarket[] = [];
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * pageSize;
+    const params = new URLSearchParams({
+      active: "true",
+      closed: "false",
+      limit: String(pageSize),
+      offset: String(offset)
+    });
+    const batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    output.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return output;
+}
+
+export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
+  const params = new URLSearchParams({ slug });
+  const markets = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+  return Array.isArray(markets) && markets.length ? markets[0] : null;
+}
+
+export async function searchActiveMarkets(query: string, limit = 25): Promise<GammaMarket[]> {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const markets = await listAllActiveMarkets();
+  return markets
+    .filter(m => {
+      const haystack = [m.question, m.description, m.slug]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    })
+    .slice(0, limit);
+}
+
+function normalizeLevels(levels: OrderLevel[] | undefined, direction: "bid" | "ask") {
+  const normalized = (levels || [])
+    .map(level => ({ price: numberOf(level.price), size: numberOf(level.size) }))
+    .filter(level => level.price > 0 && level.price <= 1 && level.size > 0);
+  normalized.sort((a, b) => direction === "bid" ? b.price - a.price : a.price - b.price);
+  return normalized;
+}
+
+export async function getOrderBook(tokenId: string): Promise<NormalizedBook> {
+  const params = new URLSearchParams({ token_id: tokenId });
+  const raw = await fetchJson<OrderBook>(`${CLOB_BASE}/book?${params}`);
+  const bids = normalizeLevels(raw.bids, "bid");
+  const asks = normalizeLevels(raw.asks, "ask");
+  const bestBid = bids[0]?.price ?? null;
+  const bestAsk = asks[0]?.price ?? null;
+  const spread = bestBid !== null && bestAsk !== null ? Math.max(0, bestAsk - bestBid) : null;
+  const midpoint = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : (bestAsk ?? bestBid);
+  const bidDepthUsdTop5 = bids.slice(0, 5).reduce((sum, l) => sum + l.price * l.size, 0);
+  const askDepthUsdTop5 = asks.slice(0, 5).reduce((sum, l) => sum + l.price * l.size, 0);
+  return { tokenId, bestBid, bestAsk, spread, midpoint, bidDepthUsdTop5, askDepthUsdTop5, raw };
+}
+
+export async function getPriceHistory(tokenId: string, hours = 6, fidelityMinutes = 1): Promise<unknown> {
+  const endTs = Math.floor(Date.now() / 1000);
+  const startTs = endTs - Math.max(1, hours) * 3600;
+  const params = new URLSearchParams({
+    market: tokenId,
+    startTs: String(startTs),
+    endTs: String(endTs),
+    fidelity: String(Math.max(1, fidelityMinutes))
+  });
+  return fetchJson<unknown>(`${CLOB_BASE}/prices-history?${params}`);
+}
+
+export async function upstreamCheck(): Promise<Record<string, unknown>> {
+  const started = Date.now();
+  const params = new URLSearchParams({ active: "true", closed: "false", limit: "1", offset: "0" });
+  const markets = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+  const gammaLatencyMs = Date.now() - started;
+  const market = markets?.[0] ?? null;
+  const tokenIds = market ? parseStringArray(market.clobTokenIds) : [];
+  let clob: Record<string, unknown> = { ok: false, reason: "no token available" };
+  if (tokenIds[0]) {
+    const clobStarted = Date.now();
+    try {
+      const book = await getOrderBook(tokenIds[0]);
+      clob = {
+        ok: true,
+        latencyMs: Date.now() - clobStarted,
+        tokenId: tokenIds[0],
+        bestBid: book.bestBid,
+        bestAsk: book.bestAsk
+      };
+    } catch (error) {
+      clob = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  return {
+    ok: true,
+    gamma: {
+      ok: Array.isArray(markets),
+      latencyMs: gammaLatencyMs,
+      sampleMarket: market?.question ?? null
+    },
+    clob
+  };
+}
