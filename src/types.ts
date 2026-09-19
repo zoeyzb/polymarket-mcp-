@@ -32,6 +32,9 @@ export interface OrderBook {
   asset_id?: string;
   bids?: OrderLevel[];
   asks?: OrderLevel[];
+  tick_size?: string | number;
+  min_order_size?: string | number;
+  neg_risk?: boolean;
   [key: string]: unknown;
 }
 
@@ -56,6 +59,25 @@ export interface ExecutionEstimate {
   roiIfWinningPct: number | null;
   fillPct: number;
 }
+
+export interface CompleteSetExecution {
+  budgetUsd: number;
+  bufferBps: number;
+  fillComplete: boolean;
+  sharesEach: number;
+  totalCostUsd: number;
+  guaranteedPayoutUsd: number;
+  grossProfit: number;
+  grossRoiPct: number | null;
+  bufferCostUsd: number;
+  netProfitAfterBuffer: number;
+  netRoiPct: number | null;
+}
+
+export type OpportunityClass =
+  | "executable_structural"
+  | "top_book_structural_only"
+  | "research_candidate";
 
 export interface ScanCandidate {
   id: string | null;
@@ -89,8 +111,14 @@ export interface ScanCandidate {
     buyBothAskTotal: number;
     grossEdgePerDollar: number;
     grossEdgePct: number;
+    executable: CompleteSetExecution[];
+    bestExecutableBudgetUsd: number | null;
+    bestNetProfitUsd: number;
+    bestNetRoiPct: number | null;
     note: string;
   } | null;
+  opportunityClass: OpportunityClass;
+  opportunityScore: number;
   rapidReviewScore: number;
   scoreBreakdown: Record<string, number>;
   flags: string[];
@@ -102,5 +130,6 @@ export interface ScanResult {
   totalActiveMarketsScanned: number;
   totalInWindowBeforeFilters: number;
   returned: number;
+  scanDurationMs?: number;
   candidates: ScanCandidate[];
 }
