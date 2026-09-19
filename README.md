@@ -1,6 +1,6 @@
 # Polymarket MCP
 
-Current production architecture: **v0.3 intelligence engine**.
+Current production architecture: **v0.4 intelligence engine**.
 
 A read-only Railway-hosted MCP server that scans **all active Polymarket markets resolving within at most two hours** and ranks short-dated market-structure opportunities.
 
@@ -94,3 +94,22 @@ Railway is configured to run the verification suite during build before starting
 
 - `GET /api/snapshot-health`
 - `GET /api/snapshots?limit=100`
+
+
+## v0.4 learning + external evidence
+
+- Dedicated Neon Postgres history store isolated from the Recover Revenue database.
+- Transactional persistence for every continuous scan, candidate observation, and event basket.
+- Empirical calibration statistics: repeated observations, persistent structural edges, class score distributions, and coverage duration.
+- Historical evidence is fed back into the live **attention score** only; structural opportunity math remains independent.
+- Conservative finalized-outcome backfill for observed markets after Gamma reports a decisive closed 1/0 state.
+- `markets.research_packet` bundles rules, live books, price regimes, trade flow, durable history, and supported external evidence.
+- `markets.external_evidence` independently cross-checks supported crypto threshold questions against Coinbase + Kraken public market data.
+- External evidence reports threshold distance and source divergence. It does **not** manufacture a win probability.
+
+Additional operational endpoints:
+
+- `GET /api/persistence-health`
+- `GET /api/calibration`
+- `GET /api/resolution-history`
+- `GET /api/realtime-health`
