@@ -16,6 +16,7 @@ import {
 import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
 import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
+import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.3.0";
@@ -163,7 +164,7 @@ export function createMcpServer() {
       const books = await getOrderBooks(input.tokenIds);
       const ordered = input.tokenIds
         .map(tokenId => books.get(tokenId))
-        .filter((book): book is NonNullable<typeof book> => Boolean(book));
+        .filter((book): book is NormalizedBook => Boolean(book));
       if (ordered.length !== input.tokenIds.length) {
         return textResult({
           ok: false,
