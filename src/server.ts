@@ -16,6 +16,7 @@ import {
 import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scanner.js";
 import { analyzePriceHistoryPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
+import { realtimeTracker } from "./realtime.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -182,6 +183,29 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.realtime_quote",
+    {
+      description: "Return the latest public Polymarket WebSocket quote cached for a subscribed short-dated outcome token.",
+      inputSchema: {
+        tokenId: z.string().min(1)
+      }
+    },
+    async input => textResult({
+      tokenId: input.tokenId,
+      quote: realtimeTracker.getQuote(input.tokenId),
+      realtime: realtimeTracker.getHealth()
+    })
+  );
+
+  server.registerTool(
+    "system.realtime_health",
+    {
+      description: "Return public Polymarket market-WebSocket connection, subscription, message, and reconnect health."
+    },
+    async () => textResult(realtimeTracker.getHealth())
+  );
+
+  server.registerTool(
     "system.snapshot_health",
     {
       description: "Return rolling in-process scanner health and deltas across recent scans."
@@ -265,6 +289,11 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/realtime-health") {
+    json(res, 200, realtimeTracker.getHealth());
+    return true;
+  }
+
   if (url.pathname === "/api/snapshots") {
     json(res, 200, getSnapshots(numberParam(url, "limit", 100, 1, 500)));
     return true;
@@ -337,7 +366,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
       arbitrage: "/api/arbitrage?minutes=120&limit=50",
       upstream: "/api/upstream-check",
-      snapshotHealth: "/api/snapshot-health"
+      snapshotHealth: "/api/snapshot-health",
+      realtimeHealth: "/api/realtime-health"
     });
     return true;
   }
@@ -390,7 +420,7 @@ async function runBackgroundScan() {
   if (backgroundScanRunning) return;
   backgroundScanRunning = true;
   try {
-    await scanClosingSoon({
+    const scan = await scanClosingSoon({
       maxMinutes: 120,
       minLiquidity: 0,
       includeOrderBooks: true,
@@ -398,6 +428,14 @@ async function runBackgroundScan() {
       sort: "opportunity",
       bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
     });
+    const tokens = new Set<string>();
+    for (const candidate of scan.candidates) {
+      for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
+    }
+    for (const basket of scan.eventBaskets || []) {
+      for (const tokenId of basket.yesTokenIds) tokens.add(tokenId);
+    }
+    realtimeTracker.updateTokens([...tokens]);
   } catch (error) {
     console.error(JSON.stringify({
       level: "error",
@@ -442,6 +480,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
 });
 
 function shutdown(signal: string) {
+  realtimeTracker.close();
   console.log(JSON.stringify({ level: "info", message: "shutdown", signal }));
   httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
