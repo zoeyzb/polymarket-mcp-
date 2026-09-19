@@ -10,6 +10,7 @@ export interface GammaMarket {
   active?: boolean;
   closed?: boolean;
   acceptingOrders?: boolean;
+  negRisk?: boolean;
   liquidity?: string | number;
   liquidityNum?: number;
   volume?: string | number;
@@ -124,6 +125,20 @@ export interface ScanCandidate {
   flags: string[];
 }
 
+export interface EventBasketOpportunity {
+  eventId: string;
+  eventTitle: string | null;
+  marketCount: number;
+  marketIds: string[];
+  outcomeQuestions: string[];
+  yesTokenIds: string[];
+  executable: import("./intelligence.js").BasketExecution[];
+  bestNetProfitUsd: number;
+  bestNetRoiPct: number | null;
+  bestBudgetUsd: number | null;
+  flags: string[];
+}
+
 export interface ScanResult {
   generatedAt: string;
   maxMinutes: number;
@@ -132,4 +147,5 @@ export interface ScanResult {
   returned: number;
   scanDurationMs?: number;
   candidates: ScanCandidate[];
+  eventBaskets?: EventBasketOpportunity[];
 }
