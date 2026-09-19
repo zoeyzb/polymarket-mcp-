@@ -1,4 +1,5 @@
 import {
+  getEventById,
   getOrderBooks,
   getPriceHistory,
   getRecentTrades,
@@ -243,13 +244,13 @@ function yesTokenId(market: GammaMarket): string | null {
   return yesIndex >= 0 && tokenIds[yesIndex] ? tokenIds[yesIndex] : null;
 }
 
-function buildEventBasketOpportunities(
+async function buildEventBasketOpportunities(
   allActive: GammaMarket[],
   now: number,
   cutoff: number,
   allBooks: Map<string, NormalizedBook>,
   bufferBps: number
-): EventBasketOpportunity[] {
+): Promise<EventBasketOpportunity[]> {
   const groups = new Map<string, { title: string | null; negRisk: boolean; augmented: boolean; markets: GammaMarket[] }>();
 
   for (const market of allActive) {
@@ -275,7 +276,56 @@ function buildEventBasketOpportunities(
     });
     if (!completeWindow) continue;
 
-    const yesTokens = group.markets.map(yesTokenId);
+    const authoritativeEvent = await getEventById(eventId);
+    if (!authoritativeEvent) continue;
+    if (authoritativeEvent.negRisk !== true && authoritativeEvent.enableNegRisk !== true) continue;
+    if (authoritativeEvent.negRiskAugmented === true) continue;
+
+    const authoritativeMarkets = Array.isArray(authoritativeEvent.markets)
+      ? authoritativeEvent.markets.filter(
+          (market): market is Record<string, unknown> => Boolean(market) && typeof market === "object"
+        )
+      : [];
+    if (authoritativeMarkets.length < 3) continue;
+
+    const identity = (market: Record<string, unknown>) =>
+      String(market.id ?? market.conditionId ?? market.slug ?? "");
+    const localIds = group.markets
+      .map(market => String(market.id ?? market.conditionId ?? market.slug ?? ""))
+      .filter(Boolean)
+      .sort();
+    const authoritativeIds = authoritativeMarkets.map(identity).filter(Boolean).sort();
+
+    if (
+      localIds.length !== authoritativeIds.length ||
+      localIds.some((id, index) => id !== authoritativeIds[index])
+    ) {
+      continue;
+    }
+
+    const authoritativeComplete = authoritativeMarkets.every(raw => {
+      const market = raw as GammaMarket;
+      const end = getEndDate(market);
+      if (!end) return false;
+      const ts = Date.parse(end);
+      const outcomes = parseStringArray(market.outcomes).map(x => x.trim().toLowerCase());
+      return (
+        ts >= now &&
+        ts <= cutoff &&
+        market.active !== false &&
+        market.closed !== true &&
+        market.acceptingOrders !== false &&
+        (market.negRisk === true || authoritativeEvent.negRisk === true || authoritativeEvent.enableNegRisk === true) &&
+        outcomes.length === 2 &&
+        outcomes.includes("yes") &&
+        outcomes.includes("no") &&
+        yesTokenId(market) !== null
+      );
+    });
+    if (!authoritativeComplete) continue;
+
+    const authoritativeGamma = authoritativeMarkets as GammaMarket[];
+    const yesTokens = authoritativeGamma.map(yesTokenId);
     if (yesTokens.some((token): token is null => token === null)) continue;
     const tokenIds = yesTokens as string[];
     const books = tokenIds.map(token => allBooks.get(token)).filter((book): book is NormalizedBook => Boolean(book));
@@ -292,10 +342,10 @@ function buildEventBasketOpportunities(
     const best = positive[0] ?? null;
     results.push({
       eventId,
-      eventTitle: group.title,
-      marketCount: group.markets.length,
-      marketIds: group.markets.map(market => String(market.id ?? market.conditionId ?? market.slug ?? "")),
-      outcomeQuestions: group.markets.map(market => String(market.question ?? "Untitled market")),
+      eventTitle: String(authoritativeEvent.title ?? group.title ?? "") || null,
+      marketCount: authoritativeGamma.length,
+      marketIds: authoritativeIds,
+      outcomeQuestions: authoritativeGamma.map(market => String(market.question ?? "Untitled market")),
       yesTokenIds: tokenIds,
       executable,
       bestNetProfitUsd: best?.netProfitUsd ?? 0,
@@ -303,6 +353,7 @@ function buildEventBasketOpportunities(
       bestBudgetUsd: best?.budgetUsd ?? null,
       flags: [
         "neg_risk_complete_outcome_set",
+        "gamma_event_child_set_verified",
         ...(topAskTotal < 1 ? ["top_book_complete_set_edge"] : []),
         ...(best ? ["depth_buffer_verified_event_basket"] : ["top_book_only_not_depth_verified"])
       ]
@@ -669,7 +720,7 @@ export async function scanClosingSoon(options?: {
   }
 
   const eventBaskets = includeOrderBooks
-    ? buildEventBasketOpportunities(all, now, cutoff, allBooks, bufferBps)
+    ? await buildEventBasketOpportunities(all, now, cutoff, allBooks, bufferBps)
     : [];
 
   const sliced = enriched.slice(offset, offset + limit);
