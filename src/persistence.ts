@@ -229,6 +229,54 @@ export async function getCalibrationStats() {
   };
 }
 
+export interface HistoricalCandidateStats {
+  observations: number;
+  executableObservations: number;
+  avgOpportunityScore: number | null;
+  maxOpportunityScore: number | null;
+  avgAttentionScore: number | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+}
+
+export async function getHistoricalCandidateStats(conditionIds: string[]) {
+  const result = new Map<string, HistoricalCandidateStats>();
+  if (!pool || conditionIds.length === 0) return result;
+
+  const unique = [...new Set(conditionIds.filter(Boolean))].slice(0, 500);
+  if (!unique.length) return result;
+
+  const { rows } = await pool.query(
+    `select
+       condition_id,
+       count(*)::int as observations,
+       count(*) filter (where opportunity_class = 'executable_structural')::int as executable_observations,
+       avg(opportunity_score)::float8 as avg_opportunity_score,
+       max(opportunity_score)::float8 as max_opportunity_score,
+       avg(attention_score)::float8 as avg_attention_score,
+       min(generated_at) as first_seen,
+       max(generated_at) as last_seen
+     from polymarket_brain.candidates
+     where condition_id = any($1::text[])
+     group by condition_id`,
+    [unique]
+  );
+
+  for (const row of rows) {
+    result.set(String(row.condition_id), {
+      observations: Number(row.observations || 0),
+      executableObservations: Number(row.executable_observations || 0),
+      avgOpportunityScore: numberOrNull(row.avg_opportunity_score),
+      maxOpportunityScore: numberOrNull(row.max_opportunity_score),
+      avgAttentionScore: numberOrNull(row.avg_attention_score),
+      firstSeen: row.first_seen ? new Date(row.first_seen).toISOString() : null,
+      lastSeen: row.last_seen ? new Date(row.last_seen).toISOString() : null
+    });
+  }
+
+  return result;
+}
+
 export async function getUnresolvedObservedMarkets(limit = 100) {
   if (!pool) return [];
   const { rows } = await pool.query(
