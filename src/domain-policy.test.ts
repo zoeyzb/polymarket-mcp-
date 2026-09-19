@@ -46,6 +46,8 @@ describe("political structural-only policy", () => {
       resolutionRules: "Election result.",
       url: null,
       binaryArbitrage: null,
+      categories: ["elections", "politics"],
+      primaryCategory: "elections",
       opportunityClass: "research_candidate",
       opportunityScore: 40,
       attentionScore: 55,
