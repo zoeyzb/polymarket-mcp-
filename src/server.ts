@@ -283,6 +283,20 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.scan_multi_horizon",
+    {
+      description: "Scan the active Polymarket universe once, then return three simultaneous research horizons (<=2h, <=6h, <=24h) plus full-universe binary/NegRisk structural opportunities regardless of expiry.",
+      inputSchema: {
+        minLiquidity: z.number().min(0).default(0),
+        limitPerLane: z.number().int().min(1).max(500).default(100),
+        structuralLimit: z.number().int().min(1).max(500).default(200),
+        bufferBps: z.number().int().min(0).max(1000).default(50)
+      }
+    },
+    async input => textResult(await scanMultiHorizon(input))
+  );
+
+  server.registerTool(
     "markets.scan_opportunities",
     {
       description: "Return the strongest market-structure opportunities among all active markets ending within at most 120 minutes. Executable structural opportunities are depth-tested at $10/$25/$50/$100 and include a configurable execution buffer. Research candidates are tradable markets, not directional recommendations.",
@@ -834,6 +848,16 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/multi-horizon") {
+    json(res, 200, await scanMultiHorizon({
+      minLiquidity: Math.max(0, Number(url.searchParams.get("minLiquidity") || 0)),
+      limitPerLane: numberParam(url, "limitPerLane", 100, 1, 500),
+      structuralLimit: numberParam(url, "structuralLimit", 200, 1, 500),
+      bufferBps: numberParam(url, "bufferBps", 50, 0, 1000)
+    }));
+    return true;
+  }
+
   if (url.pathname === "/api/opportunities") {
     json(res, 200, await scanOpportunities({
       maxMinutes: numberParam(url, "minutes", 120, 1, 120),
@@ -882,6 +906,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       mcp: "/mcp",
       health: "/health",
       opportunities: "/api/opportunities?minutes=120&limit=50",
+      multiHorizon: "/api/multi-horizon?limitPerLane=100&structuralLimit=200",
       scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
       arbitrage: "/api/arbitrage?minutes=120&limit=50",
       upstream: "/api/upstream-check",
@@ -948,7 +973,7 @@ let streamPersistRunning = false;
 let quoteCompactionRunning = false;
 let historicalBackfillRunning = false;
 let maintenanceRunning = false;
-const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
+const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
 const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTION_SECONDS || 60));
@@ -963,16 +988,28 @@ async function runBackgroundScan() {
   if (backgroundScanRunning) return;
   backgroundScanRunning = true;
   try {
-    const scan = await scanClosingSoon({
-      maxMinutes: 120,
+    const multi = await scanMultiHorizon({
       minLiquidity: 0,
-      includeOrderBooks: true,
-      limit: 500,
-      sort: "opportunity",
+      limitPerLane: 500,
+      structuralLimit: 500,
       bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
     });
 
-    await persistScan(scan).catch(error => {
+    // Persist the broad <=24h lane so historical evidence accumulates before markets
+    // become urgent. Full-universe structural opportunities remain available in
+    // multi.structuralUniverse without polluting the time-window semantics.
+    const broadScan = {
+      generatedAt: multi.generatedAt,
+      maxMinutes: 1440,
+      totalActiveMarketsScanned: multi.totalActiveMarketsScanned,
+      totalInWindowBeforeFilters: multi.lanes.broader24h.totalInWindow,
+      returned: multi.lanes.broader24h.candidates.length,
+      scanDurationMs: multi.scanDurationMs,
+      candidates: multi.lanes.broader24h.candidates,
+      eventBaskets: []
+    };
+
+    await persistScan(broadScan).catch(error => {
       console.error(JSON.stringify({
         level: "error",
         message: "persistence_write_failed",
@@ -981,7 +1018,20 @@ async function runBackgroundScan() {
       }));
     });
 
-    await persistAlertsFromScan(scan).catch(error => {
+    const alertCandidates = new Map<string, (typeof multi.lanes.broader24h.candidates)[number]>();
+    for (const candidate of multi.lanes.broader24h.candidates) {
+      alertCandidates.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
+    }
+    for (const candidate of multi.structuralUniverse.binary) {
+      alertCandidates.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
+    }
+
+    await persistAlertsFromScan({
+      ...broadScan,
+      candidates: [...alertCandidates.values()],
+      returned: alertCandidates.size,
+      eventBaskets: multi.structuralUniverse.eventBaskets
+    }).catch(error => {
       console.error(JSON.stringify({
         level: "error",
         message: "alert_persistence_failed",
@@ -990,14 +1040,33 @@ async function runBackgroundScan() {
       }));
     });
 
+    // Realtime subscriptions focus on <=6h markets plus any structural edge anywhere.
+    // The 24h/full-universe lanes are still rescanned from fresh CLOB books each cycle.
     const tokens = new Set<string>();
-    for (const candidate of scan.candidates) {
+    for (const candidate of multi.lanes.developing6h.candidates) {
       for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
     }
-    for (const basket of scan.eventBaskets || []) {
+    for (const candidate of multi.structuralUniverse.binary) {
+      for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
+    }
+    for (const basket of multi.structuralUniverse.eventBaskets) {
       for (const tokenId of basket.yesTokenIds) tokens.add(tokenId);
     }
     realtimeTracker.updateTokens([...tokens]);
+
+    console.log(JSON.stringify({
+      level: "info",
+      message: "multi_horizon_scan",
+      totalActive: multi.totalActiveMarketsScanned,
+      urgent2h: multi.lanes.urgent2h.totalInWindow,
+      developing6h: multi.lanes.developing6h.totalInWindow,
+      broader24h: multi.lanes.broader24h.totalInWindow,
+      structuralBinary: multi.structuralUniverse.binary.length,
+      structuralEventBaskets: multi.structuralUniverse.eventBaskets.length,
+      executableStructural: multi.structuralUniverse.executableCount,
+      scanDurationMs: multi.scanDurationMs,
+      at: new Date().toISOString()
+    }));
   } catch (error) {
     console.error(JSON.stringify({
       level: "error",
