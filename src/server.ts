@@ -22,13 +22,16 @@ import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
 import {
   compactRealtimeQuotes,
+  getAlertStats,
   getCalibrationStats,
   getHistoricalCandidateStats,
   getPersistenceIntegrity,
   getPersistentStats,
+  getRecentAlerts,
   getResolutionStats,
   getStreamPersistenceStats,
   getUnresolvedObservedMarkets,
+  persistAlertsFromScan,
   persistRealtimeQuotes,
   persistScan,
   persistSportsEvents,
@@ -573,6 +576,20 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.alerts",
+    {
+      description: "Return durable deduplicated market-structure and behavior alerts such as depth-verified structural edges, price shocks, abnormal flow, and supported external-threshold proximity. Descriptive only; no outcome recommendation.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(100)
+      }
+    },
+    async input => textResult({
+      stats: await getAlertStats(),
+      alerts: await getRecentAlerts(input.limit)
+    })
+  );
+
+  server.registerTool(
     "system.calibration",
     {
       description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
@@ -752,6 +769,14 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/alerts") {
+    json(res, 200, {
+      stats: await getAlertStats().catch(error => ({ error: errorMessage(error) })),
+      alerts: await getRecentAlerts(numberParam(url, "limit", 100, 1, 500)).catch(() => [])
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/calibration") {
     json(res, 200, await getCalibrationStats().catch(error => ({ error: errorMessage(error) })));
     return true;
@@ -842,6 +867,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       audit: "/api/audit",
       mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
+      alerts: "/api/alerts?limit=100",
       calibration: "/api/calibration",
       resolutionHistory: "/api/resolution-history"
     });
@@ -915,6 +941,15 @@ async function runBackgroundScan() {
       console.error(JSON.stringify({
         level: "error",
         message: "persistence_write_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      }));
+    });
+
+    await persistAlertsFromScan(scan).catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "alert_persistence_failed",
         error: errorMessage(error),
         at: new Date().toISOString()
       }));
