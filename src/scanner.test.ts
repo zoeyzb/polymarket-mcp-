@@ -243,6 +243,8 @@ describe("system audit invariants", () => {
         resolutionRules: null,
         url: null,
         binaryArbitrage: null,
+        categories: ["other"],
+        primaryCategory: "other",
         opportunityClass: "executable_structural",
         opportunityScore: 80,
         rapidReviewScore: 70,
