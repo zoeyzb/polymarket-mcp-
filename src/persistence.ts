@@ -5,6 +5,11 @@ const { Pool } = pg;
 
 const DATABASE_URL = process.env.POLYMARKET_DATABASE_URL || "";
 const QUERY_TIMEOUT_MS = Math.max(1000, Number(process.env.PERSISTENCE_TIMEOUT_MS || 8000));
+const WRITER_ID =
+  process.env.POLYMARKET_WRITER_ID ||
+  process.env.RAILWAY_SERVICE_ID ||
+  "polymarket-writer";
+const WRITER_LEASE_SECONDS = Math.max(35, Number(process.env.POLYMARKET_WRITER_LEASE_SECONDS || 45));
 
 const pool = DATABASE_URL
   ? new Pool({
@@ -26,6 +31,23 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+async function claimWriterLease(client: pg.PoolClient) {
+  const { rows } = await client.query<{ holder: string }>(
+    `insert into polymarket_brain.writer_lease (
+       lease_name, holder, lease_until, updated_at
+     ) values ('scan-writer', $1, now() + ($2 || ' seconds')::interval, now())
+     on conflict (lease_name) do update set
+       holder = excluded.holder,
+       lease_until = excluded.lease_until,
+       updated_at = now()
+     where polymarket_brain.writer_lease.lease_until < now()
+        or polymarket_brain.writer_lease.holder = excluded.holder
+     returning holder`,
+    [WRITER_ID, WRITER_LEASE_SECONDS]
+  );
+  return rows[0]?.holder === WRITER_ID;
+}
+
 export async function persistScan(scan: ScanResult) {
   if (!pool) return { ok: false, configured: false, reason: "not_configured" };
 
@@ -33,6 +55,18 @@ export async function persistScan(scan: ScanResult) {
   try {
     await client.query(`set statement_timeout = '${QUERY_TIMEOUT_MS}ms'`);
     await client.query("begin");
+
+    const hasWriterLease = await claimWriterLease(client);
+    if (!hasWriterLease) {
+      await client.query("rollback");
+      return {
+        ok: false,
+        configured: true,
+        skipped: true,
+        reason: "writer_lease_held_elsewhere",
+        writerId: WRITER_ID
+      };
+    }
 
     const executableCount =
       scan.candidates.filter(candidate => candidate.opportunityClass === "executable_structural").length +
@@ -46,8 +80,8 @@ export async function persistScan(scan: ScanResult) {
     const scanInsert = await client.query<{ id: string }>(
       `insert into polymarket_brain.scans (
         generated_at, max_minutes, active_markets, in_window, returned,
-        scan_duration_ms, executable_count, top_opportunity_score, payload
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+        scan_duration_ms, executable_count, top_opportunity_score, payload, writer_id
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
       returning id`,
       [
         scan.generatedAt,
@@ -58,7 +92,8 @@ export async function persistScan(scan: ScanResult) {
         scan.scanDurationMs ?? null,
         executableCount,
         topOpportunityScore,
-        JSON.stringify(scan)
+        JSON.stringify(scan),
+        WRITER_ID
       ]
     );
 
@@ -126,7 +161,8 @@ export async function persistScan(scan: ScanResult) {
       configured: true,
       scanId,
       candidates: scan.candidates.length,
-      eventBaskets: scan.eventBaskets?.length ?? 0
+      eventBaskets: scan.eventBaskets?.length ?? 0,
+      writerId: WRITER_ID
     };
   } catch (error) {
     await client.query("rollback").catch(() => {});
@@ -363,18 +399,39 @@ export async function getPersistenceIntegrity() {
              lag(generated_at) over (order by generated_at) as previous_at
       from polymarket_brain.scans
     ),
+    recent as (
+      select generated_at,
+             lag(generated_at) over (order by generated_at) as previous_at
+      from (
+        select generated_at
+        from polymarket_brain.scans
+        order by generated_at desc
+        limit 20
+      ) x
+    ),
     duplicate_groups as (
       select generated_at, count(*) as copies
       from polymarket_brain.scans
       group by generated_at
       having count(*) > 1
+    ),
+    active_writers as (
+      select distinct writer_id
+      from polymarket_brain.scans
+      where generated_at > now() - interval '3 minutes'
+        and writer_id is not null
     )
     select
       (select count(*)::int from polymarket_brain.scans) as "scanCount",
       (select count(*)::int from duplicate_groups) as "duplicateTimestamps",
       (select max(generated_at) from polymarket_brain.scans) as "lastScanAt",
       (select round(avg(extract(epoch from (generated_at - previous_at)))::numeric,2)
-       from ordered where previous_at is not null) as "avgIntervalSeconds"
+       from ordered where previous_at is not null) as "avgIntervalSeconds",
+      (select round(avg(extract(epoch from (generated_at - previous_at)))::numeric,2)
+       from recent where previous_at is not null) as "recentAvgIntervalSeconds",
+      (select count(*)::int from active_writers) as "activeWriterCount",
+      (select holder from polymarket_brain.writer_lease where lease_name='scan-writer') as "leaseHolder",
+      (select lease_until from polymarket_brain.writer_lease where lease_name='scan-writer') as "leaseUntil"
   `);
 
   const row = rows[0] || {};
@@ -389,7 +446,11 @@ export async function getPersistenceIntegrity() {
     duplicateTimestamps: Number(row.duplicateTimestamps || 0),
     lastScanAt,
     ageSeconds: ageSeconds === null ? null : Number(ageSeconds.toFixed(2)),
-    avgIntervalSeconds: numberOrNull(row.avgIntervalSeconds)
+    avgIntervalSeconds: numberOrNull(row.avgIntervalSeconds),
+    recentAvgIntervalSeconds: numberOrNull(row.recentAvgIntervalSeconds),
+    activeWriterCount: Number(row.activeWriterCount || 0),
+    leaseHolder: row.leaseHolder ?? null,
+    leaseUntil: row.leaseUntil ? new Date(row.leaseUntil).toISOString() : null
   };
 }
 
@@ -409,6 +470,8 @@ export async function testPersistenceConnection() {
 export function persistenceConfig() {
   return {
     configured: configured(),
-    backend: configured() ? "neon_postgres" : "disabled"
+    backend: configured() ? "neon_postgres" : "disabled",
+    writerId: WRITER_ID,
+    writerLeaseSeconds: WRITER_LEASE_SECONDS
   };
 }
