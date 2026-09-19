@@ -168,3 +168,32 @@ export interface ScanResult {
   candidates: ScanCandidate[];
   eventBaskets?: EventBasketOpportunity[];
 }
+
+
+export interface MultiHorizonLane {
+  key: "urgent_2h" | "developing_6h" | "broader_24h";
+  maxMinutes: number;
+  totalInWindow: number;
+  returned: number;
+  candidates: ScanCandidate[];
+}
+
+export interface StructuralUniverseResult {
+  binary: ScanCandidate[];
+  eventBaskets: EventBasketOpportunity[];
+  executableCount: number;
+  topBookOnlyCount: number;
+}
+
+export interface MultiHorizonScanResult {
+  generatedAt: string;
+  totalActiveMarketsScanned: number;
+  scanDurationMs: number;
+  bufferBps: number;
+  lanes: {
+    urgent2h: MultiHorizonLane;
+    developing6h: MultiHorizonLane;
+    broader24h: MultiHorizonLane;
+  };
+  structuralUniverse: StructuralUniverseResult;
+}
