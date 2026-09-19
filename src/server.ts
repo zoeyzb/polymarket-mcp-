@@ -21,6 +21,7 @@ import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteO
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
 import {
+  compactRealtimeQuotes,
   getCalibrationStats,
   getHistoricalCandidateStats,
   getPersistenceIntegrity,
@@ -891,9 +892,11 @@ const httpServer = createServer(async (req, res) => {
 let backgroundScanRunning = false;
 let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
+let quoteCompactionRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
+const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTION_SECONDS || 60));
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -967,6 +970,31 @@ async function runStreamPersistenceWorker() {
     }));
   } finally {
     streamPersistRunning = false;
+  }
+}
+
+async function runQuoteCompactionWorker() {
+  if (quoteCompactionRunning) return;
+  quoteCompactionRunning = true;
+  try {
+    const result = await compactRealtimeQuotes(180);
+    if ((result.barsUpserted || 0) > 0) {
+      console.log(JSON.stringify({
+        level: "info",
+        message: "quote_compaction",
+        ...result,
+        at: new Date().toISOString()
+      }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "quote_compaction_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    quoteCompactionRunning = false;
   }
 }
 
@@ -1051,6 +1079,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   setInterval(() => {
     runStreamPersistenceWorker().catch(() => {});
   }, STREAM_PERSIST_SECONDS * 1000).unref();
+
+  runQuoteCompactionWorker().catch(() => {});
+  setInterval(() => {
+    runQuoteCompactionWorker().catch(() => {});
+  }, QUOTE_COMPACTION_SECONDS * 1000).unref();
 
   runBackgroundScan().catch(() => {});
   setInterval(() => {
