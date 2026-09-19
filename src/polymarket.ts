@@ -54,7 +54,7 @@ export function parseNumberArray(value: unknown): number[] {
 let activeMarketCache: { at: number; markets: GammaMarket[] } | null = null;
 const ACTIVE_CACHE_MS = Math.max(0, Number(process.env.ACTIVE_MARKET_CACHE_MS || 15000));
 
-export async function listAllActiveMarkets(maxPages = 21, pageSize = 100): Promise<GammaMarket[]> {
+export async function listAllActiveMarkets(maxPages = 1000, pageSize = 100): Promise<GammaMarket[]> {
   if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
     return activeMarketCache.markets;
   }
@@ -89,7 +89,7 @@ export async function listAllActiveMarkets(maxPages = 21, pageSize = 100): Promi
 export async function listActiveMarketsEndingBetween(
   start: Date,
   end: Date,
-  maxPages = 21,
+  maxPages = 1000,
   pageSize = 100
 ): Promise<GammaMarket[]> {
   const byKey = new Map<string, GammaMarket>();
@@ -99,7 +99,6 @@ export async function listActiveMarketsEndingBetween(
     const params = new URLSearchParams({
       active: "true",
       closed: "false",
-      accepting_orders: "true",
       end_date_min: start.toISOString(),
       end_date_max: end.toISOString(),
       order: "endDate",
