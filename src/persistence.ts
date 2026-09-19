@@ -763,6 +763,37 @@ export async function getHistoricalCalibrationSummary() {
   };
 }
 
+export async function upsertWorkerHeartbeat(
+  role: string,
+  details: Record<string, unknown> = {}
+) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const serviceId = process.env.RAILWAY_SERVICE_ID || null;
+  await pool.query(
+    `insert into polymarket_brain.worker_heartbeats (role, service_id, updated_at, details)
+     values ($1,$2,now(),$3::jsonb)
+     on conflict (role) do update set
+       service_id = excluded.service_id,
+       updated_at = excluded.updated_at,
+       details = excluded.details`,
+    [role, serviceId, JSON.stringify(details)]
+  );
+  return { configured: true, role, serviceId };
+}
+
+export async function getWorkerHeartbeats() {
+  if (!pool) return [];
+  const { rows } = await pool.query(
+    `select role, service_id as "serviceId", updated_at as "updatedAt", details
+     from polymarket_brain.worker_heartbeats
+     order by role`
+  );
+  return rows.map(row => ({
+    ...row,
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : null
+  }));
+}
+
 export async function getPersistentStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
