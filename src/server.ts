@@ -236,13 +236,13 @@ async function runSystemAudit() {
   const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
   const realtimeConsistent =
     expectedTokens === 0
-      ? realtime.subscribedTokens === 0
-      : realtime.subscribedTokens === expectedTokens || realtime.state === "connecting";
+      ? realtime.subscribedTokens >= 0
+      : realtime.subscribedTokens >= expectedTokens || realtime.state === "connecting";
   findings.push({
     id: "realtime_subscription_consistency",
     ok: realtimeConsistent,
     severity: "warning",
-    detail: `expectedTokens=${expectedTokens}, subscribedTokens=${realtime.subscribedTokens}, state=${realtime.state}`
+    detail: `urgent2hTokens=${expectedTokens}, subscribedTokens=${realtime.subscribedTokens}, state=${realtime.state}; subscriptions may exceed urgent tokens because multi-horizon mode also tracks <=6h and structural edges`
   });
 
   return {
