@@ -344,6 +344,146 @@ export async function getStreamPersistenceStats() {
   };
 }
 
+type AlertSpec = {
+  alertType: string;
+  severity: "high" | "medium" | "low";
+  details: Record<string, unknown>;
+};
+
+function alertsForCandidate(candidate: ScanResult["candidates"][number]): AlertSpec[] {
+  const alerts: AlertSpec[] = [];
+
+  if (candidate.opportunityClass === "executable_structural") {
+    alerts.push({
+      alertType: "executable_structural",
+      severity: "high",
+      details: {
+        bestNetProfitUsd: candidate.binaryArbitrage?.bestNetProfitUsd ?? null,
+        bestNetRoiPct: candidate.binaryArbitrage?.bestNetRoiPct ?? null
+      }
+    });
+  } else if (candidate.opportunityClass === "top_book_structural_only") {
+    alerts.push({
+      alertType: "top_book_structural_only",
+      severity: "medium",
+      details: {
+        note: "Top-book structural edge is not depth-verified."
+      }
+    });
+  }
+
+  const flagMap: Record<string, { alertType: string; severity: "high" | "medium" | "low" }> = {
+    price_shock: { alertType: "price_shock", severity: "high" },
+    high_price_volatility: { alertType: "high_price_volatility", severity: "medium" },
+    near_external_resolution_threshold: { alertType: "near_external_resolution_threshold", severity: "high" },
+    strong_recent_trade_imbalance: { alertType: "strong_recent_trade_imbalance", severity: "medium" },
+    large_recent_trade: { alertType: "large_recent_trade", severity: "medium" },
+    external_source_divergence: { alertType: "external_source_divergence", severity: "low" }
+  };
+
+  for (const flag of candidate.flags || []) {
+    const mapped = flagMap[flag];
+    if (!mapped) continue;
+    alerts.push({
+      ...mapped,
+      details: {
+        flag,
+        priceRegime: candidate.marketSignals?.priceRegime ?? null,
+        tradeFlow: candidate.marketSignals?.tradeFlow ?? null,
+        externalEvidence: candidate.externalEvidence ?? null,
+        historicalEvidence: candidate.historicalEvidence ?? null
+      }
+    });
+  }
+
+  return alerts;
+}
+
+export async function persistAlertsFromScan(scan: ScanResult) {
+  if (!pool) return { configured: false, reason: "not_configured", upserted: 0 };
+
+  let upserted = 0;
+  for (const candidate of scan.candidates) {
+    const specs = alertsForCandidate(candidate);
+    const marketKey = candidate.conditionId || candidate.id || candidate.slug;
+    if (!marketKey) continue;
+
+    for (const spec of specs) {
+      const fingerprint = `${marketKey}:${spec.alertType}`;
+      const result = await pool.query(
+        `insert into polymarket_brain.signal_alerts (
+           fingerprint, first_seen_at, last_seen_at, market_id, condition_id,
+           slug, question, alert_type, severity, opportunity_class,
+           opportunity_score, discovery_score, minutes_remaining, details
+         ) values (
+           $1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb
+         )
+         on conflict (fingerprint) do update set
+           last_seen_at = excluded.last_seen_at,
+           severity = excluded.severity,
+           opportunity_class = excluded.opportunity_class,
+           opportunity_score = excluded.opportunity_score,
+           discovery_score = excluded.discovery_score,
+           minutes_remaining = excluded.minutes_remaining,
+           details = excluded.details,
+           occurrences = polymarket_brain.signal_alerts.occurrences + 1,
+           updated_at = now()`,
+        [
+          fingerprint,
+          scan.generatedAt,
+          candidate.id,
+          candidate.conditionId,
+          candidate.slug,
+          candidate.question,
+          spec.alertType,
+          spec.severity,
+          candidate.opportunityClass,
+          candidate.opportunityScore,
+          candidate.discoveryScore ?? candidate.opportunityScore,
+          candidate.minutesRemaining,
+          JSON.stringify(spec.details)
+        ]
+      );
+      upserted += result.rowCount ?? 0;
+    }
+  }
+
+  return { configured: true, upserted };
+}
+
+export async function getRecentAlerts(limit = 100) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(500, limit));
+  const { rows } = await pool.query(
+    `select
+       id, fingerprint, first_seen_at as "firstSeenAt", last_seen_at as "lastSeenAt",
+       market_id as "marketId", condition_id as "conditionId", slug, question,
+       alert_type as "alertType", severity, opportunity_class as "opportunityClass",
+       opportunity_score::float8 as "opportunityScore",
+       discovery_score::float8 as "discoveryScore",
+       minutes_remaining::float8 as "minutesRemaining",
+       details, occurrences
+     from polymarket_brain.signal_alerts
+     order by last_seen_at desc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}
+
+export async function getAlertStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      count(*)::int as "uniqueAlerts",
+      count(*) filter (where last_seen_at > now() - interval '10 minutes')::int as "activeLast10m",
+      coalesce(sum(occurrences),0)::int as "totalOccurrences",
+      max(last_seen_at) as "lastAlertAt"
+    from polymarket_brain.signal_alerts
+  `);
+  return { configured: true, ...rows[0] };
+}
+
 export async function getPersistentStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
