@@ -107,6 +107,21 @@ async function runSystemAudit() {
     detail: `duplicateTimestamps=${integrity.duplicateTimestamps ?? "unknown"}`
   });
 
+  findings.push({
+    id: "single_persistence_writer",
+    ok: Number(integrity.activeWriterCount || 0) <= 1,
+    severity: "critical",
+    detail: `activeWriterCount=${integrity.activeWriterCount ?? "unknown"}, leaseHolder=${integrity.leaseHolder ?? "none"}`
+  });
+
+  const recentInterval = Number(integrity.recentAvgIntervalSeconds);
+  findings.push({
+    id: "recent_scan_cadence",
+    ok: !Number.isFinite(recentInterval) || (recentInterval >= 20 && recentInterval <= 45),
+    severity: "warning",
+    detail: `recentAvgIntervalSeconds=${integrity.recentAvgIntervalSeconds ?? "unknown"}`
+  });
+
   const realtime = realtimeTracker.getHealth();
   const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
   const realtimeConsistent =
