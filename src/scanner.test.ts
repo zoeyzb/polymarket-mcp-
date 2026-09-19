@@ -7,6 +7,7 @@ import {
   calculateCompleteOutcomeBasket
 } from "./intelligence.js";
 import { inferFinalResolution } from "./resolutions.js";
+import { parseCryptoThresholdQuestion } from "./external-evidence.js";
 import type { NormalizedBook } from "./types.js";
 
 function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
@@ -172,5 +173,30 @@ describe("final resolution inference", () => {
       outcomes: '["Yes","No"]',
       outcomePrices: '["0.98","0.02"]'
     })).toBeNull();
+  });
+});
+
+
+describe("crypto threshold parsing", () => {
+  it("parses supported above-threshold questions", () => {
+    expect(parseCryptoThresholdQuestion("Will Bitcoin be above $85,000 at 4pm?")).toEqual({
+      asset: "BTC",
+      coinbaseProduct: "BTC-USD",
+      krakenPair: "xbtusd",
+      thresholdUsd: 85000,
+      direction: "above"
+    });
+  });
+
+  it("parses supported below-threshold questions", () => {
+    const parsed = parseCryptoThresholdQuestion("Will ETH be below $4,250.50 tonight?");
+    expect(parsed?.asset).toBe("ETH");
+    expect(parsed?.thresholdUsd).toBe(4250.5);
+    expect(parsed?.direction).toBe("below");
+  });
+
+  it("rejects unsupported or ambiguous questions", () => {
+    expect(parseCryptoThresholdQuestion("Will Bitcoin go up today?")).toBeNull();
+    expect(parseCryptoThresholdQuestion("Will gold be above $4,000?")).toBeNull();
   });
 });
