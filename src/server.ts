@@ -18,7 +18,7 @@ import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scann
 import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
-import { getPersistentStats, persistScan, persistenceConfig } from "./persistence.js";
+import { getCalibrationStats, getPersistentStats, persistScan, persistenceConfig } from "./persistence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -226,6 +226,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.calibration",
+    {
+      description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
+    },
+    async () => textResult(await getCalibrationStats())
+  );
+
+  server.registerTool(
     "system.persistence_health",
     {
       description: "Return durable Polymarket history backend status and aggregate stored scan statistics."
@@ -335,6 +343,11 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/calibration") {
+    json(res, 200, await getCalibrationStats().catch(error => ({ error: errorMessage(error) })));
+    return true;
+  }
+
   if (url.pathname === "/api/snapshots") {
     json(res, 200, getSnapshots(numberParam(url, "limit", 100, 1, 500)));
     return true;
@@ -409,7 +422,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       upstream: "/api/upstream-check",
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
-      persistenceHealth: "/api/persistence-health"
+      persistenceHealth: "/api/persistence-health",
+      calibration: "/api/calibration"
     });
     return true;
   }
