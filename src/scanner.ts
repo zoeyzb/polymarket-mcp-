@@ -12,6 +12,7 @@ import {
   calculateCompleteOutcomeBasket
 } from "./intelligence.js";
 import { recordSnapshot } from "./snapshots.js";
+import { getHistoricalCandidateStats } from "./persistence.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -495,6 +496,42 @@ async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
   }
 }
 
+async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
+  const conditionIds = candidates
+    .map(candidate => candidate.conditionId)
+    .filter((id): id is string => Boolean(id));
+
+  if (!conditionIds.length) return;
+
+  const history = await getHistoricalCandidateStats(conditionIds).catch(() => new Map());
+  for (const candidate of candidates) {
+    if (!candidate.conditionId) continue;
+    const stats = history.get(candidate.conditionId);
+    if (!stats) continue;
+
+    const persistenceBoost = Math.min(
+      8,
+      Math.log2(stats.observations + 1) * 2 +
+      Math.min(4, stats.executableObservations * 2)
+    );
+
+    candidate.historicalEvidence = {
+      ...stats,
+      persistenceBoost: round(persistenceBoost, 2)
+    };
+
+    candidate.attentionScore = round(
+      Math.min(100, (candidate.attentionScore ?? candidate.opportunityScore) + persistenceBoost),
+      1
+    );
+
+    if (stats.observations >= 2) candidate.flags.push("repeated_market_observation");
+    if (candidate.opportunityClass === "executable_structural" && stats.executableObservations >= 1) {
+      candidate.flags.push("repeated_structural_edge");
+    }
+  }
+}
+
 export async function scanClosingSoon(options?: {
   maxMinutes?: number;
   minLiquidity?: number;
@@ -536,6 +573,7 @@ export async function scanClosingSoon(options?: {
 
   if (includeOrderBooks && enriched.length) {
     await enrichBehaviorSignals(enriched);
+    await enrichHistoricalEvidence(enriched);
   }
 
   if (sort === "opportunity") {
