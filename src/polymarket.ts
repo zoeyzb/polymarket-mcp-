@@ -70,7 +70,15 @@ export async function listAllActiveMarkets(maxPages = 1000, pageSize = 100): Pro
       offset: String(offset)
     });
 
-    const batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+    let batch: GammaMarket[];
+    try {
+      batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (page > 0 && message.includes("422")) break;
+      throw error;
+    }
+
     if (!Array.isArray(batch) || batch.length === 0) break;
 
     for (const market of batch) {
