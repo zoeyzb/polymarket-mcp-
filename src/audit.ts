@@ -1,4 +1,5 @@
 import type { ScanResult } from "./types.js";
+import { POLITICAL_DIRECTIONAL_FLAGS, isPoliticalCandidate } from "./domain-policy.js";
 
 export interface AuditFinding {
   id: string;
@@ -76,6 +77,20 @@ export function auditScanResult(scan: ScanResult): AuditFinding[] {
     scoreViolations.length === 0,
     "critical",
     `violations=${scoreViolations.length}`
+  );
+
+  const politicalViolations = scan.candidates.filter(candidate =>
+    isPoliticalCandidate(candidate) && (
+      candidate.flags.some(flag => POLITICAL_DIRECTIONAL_FLAGS.has(flag)) ||
+      Math.abs((candidate.attentionScore ?? candidate.opportunityScore) - candidate.opportunityScore) > 0.01 ||
+      Math.abs((candidate.discoveryScore ?? candidate.opportunityScore) - candidate.opportunityScore) > 0.01
+    )
+  );
+  push(
+    "political_structural_only_integrity",
+    politicalViolations.length === 0,
+    "critical",
+    `violations=${politicalViolations.length}`
   );
 
   const augmentedFlags = (scan.eventBaskets || []).filter(basket =>
