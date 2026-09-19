@@ -69,13 +69,13 @@ async function runMcpSelfTest() {
 
   let timer: NodeJS.Timeout | null = null;
   try {
-    await Promise.race([
+    return await Promise.race([
       (async () => {
         await client.connect(transport);
         const result = await client.listTools();
         const names = result.tools.map(tool => tool.name).sort();
         return {
-          ok: true,
+          ok: true as const,
           endpoint: "/mcp",
           transport: "streamable-http",
           toolCount: names.length,
@@ -86,24 +86,7 @@ async function runMcpSelfTest() {
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("mcp_self_test_timeout")), timeoutMs);
       })
-    ]).then(result => result as {
-      ok: true;
-      endpoint: string;
-      transport: string;
-      toolCount: number;
-      tools: string[];
-      latencyMs: number;
-    });
-    const listed = await client.listTools();
-    const names = listed.tools.map(tool => tool.name).sort();
-    return {
-      ok: true,
-      endpoint: "/mcp",
-      transport: "streamable-http",
-      toolCount: names.length,
-      tools: names,
-      latencyMs: Date.now() - started
-    };
+    ]);
   } catch (error) {
     return {
       ok: false,
