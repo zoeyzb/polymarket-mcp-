@@ -24,7 +24,9 @@ import type {
   NormalizedBook,
   OpportunityClass,
   ScanCandidate,
-  ScanResult
+  ScanResult,
+  MultiHorizonScanResult,
+  MultiHorizonLane
 } from "./types.js";
 
 const BUDGETS = [10, 25, 50, 100];
@@ -800,5 +802,144 @@ export async function scanBinaryArbitrage(maxMinutes = 120, limit = 100, bufferB
     ...scan,
     returned: opportunities.length,
     candidates: opportunities
+  };
+}
+
+
+function sortCandidates(candidates: ScanCandidate[], sort: "soonest" | "review_score" | "liquidity" | "opportunity" = "opportunity") {
+  if (sort === "opportunity") {
+    candidates.sort(compareDiscovery);
+  } else if (sort === "review_score") {
+    candidates.sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || a.minutesRemaining - b.minutesRemaining);
+  } else if (sort === "liquidity") {
+    candidates.sort((a, b) => b.liquidityUsd - a.liquidityUsd || a.minutesRemaining - b.minutesRemaining);
+  } else {
+    candidates.sort((a, b) => a.minutesRemaining - b.minutesRemaining);
+  }
+  return candidates;
+}
+
+function buildLane(
+  key: MultiHorizonLane["key"],
+  maxMinutes: number,
+  enriched: ScanCandidate[],
+  limit: number
+): MultiHorizonLane {
+  const candidates = enriched
+    .filter(candidate => candidate.minutesRemaining >= 0 && candidate.minutesRemaining <= maxMinutes)
+    .sort(compareDiscovery);
+
+  return {
+    key,
+    maxMinutes,
+    totalInWindow: candidates.length,
+    returned: Math.min(limit, candidates.length),
+    candidates: candidates.slice(0, limit)
+  };
+}
+
+export async function scanMultiHorizon(options?: {
+  minLiquidity?: number;
+  limitPerLane?: number;
+  structuralLimit?: number;
+  bufferBps?: number;
+}): Promise<MultiHorizonScanResult> {
+  const started = Date.now();
+  const now = started;
+  const minLiquidity = Math.max(0, options?.minLiquidity ?? 0);
+  const limitPerLane = Math.min(500, Math.max(1, options?.limitPerLane ?? 100));
+  const structuralLimit = Math.min(500, Math.max(1, options?.structuralLimit ?? 200));
+  const bufferBps = Math.max(0, options?.bufferBps ?? DEFAULT_BUFFER_BPS);
+
+  const all = (await listAllActiveMarkets())
+    .filter(market =>
+      market.active !== false &&
+      market.closed !== true &&
+      market.acceptingOrders !== false &&
+      n(market.liquidityNum ?? market.liquidity) >= minLiquidity
+    );
+
+  const tokenIds = [...new Set(
+    all.flatMap(market => parseStringArray(market.clobTokenIds))
+  )];
+  const allBooks = await getOrderBooks(tokenIds);
+
+  const enrichedAll = (await Promise.all(
+    all.map(market => enrichMarket(market, now, true, allBooks, bufferBps))
+  )).filter((candidate): candidate is ScanCandidate => candidate !== null);
+
+  // Expensive behavioral/external enrichment is reserved for the <=24h research universe.
+  // Structural execution math above still covers every active market.
+  const within24h = enrichedAll.filter(candidate => candidate.minutesRemaining <= 1440);
+  if (within24h.length) {
+    await enrichBehaviorSignals(within24h);
+    await enrichExternalEvidence(within24h);
+    await enrichHistoricalEvidence(within24h);
+  }
+
+  // Historical repetition can still strengthen metadata on structural candidates beyond 24h
+  // without invoking external directional feeds.
+  const structuralBeyond24h = enrichedAll.filter(candidate =>
+    candidate.minutesRemaining > 1440 &&
+    candidate.opportunityClass !== "research_candidate"
+  );
+  if (structuralBeyond24h.length) {
+    await enrichHistoricalEvidence(structuralBeyond24h);
+  }
+
+  finalizeDiscoveryScores(enrichedAll);
+
+  const urgent2h = buildLane("urgent_2h", 120, enrichedAll, limitPerLane);
+  const developing6h = buildLane("developing_6h", 360, enrichedAll, limitPerLane);
+  const broader24h = buildLane("broader_24h", 1440, enrichedAll, limitPerLane);
+
+  const structuralBinary = enrichedAll
+    .filter(candidate =>
+      candidate.opportunityClass === "executable_structural" ||
+      candidate.opportunityClass === "top_book_structural_only"
+    )
+    .sort(compareDiscovery)
+    .slice(0, structuralLimit);
+
+  const latestEndTs = all.reduce((maxTs, market) => {
+    const end = getEndDate(market);
+    if (!end) return maxTs;
+    const ts = Date.parse(end);
+    return Number.isFinite(ts) ? Math.max(maxTs, ts) : maxTs;
+  }, now);
+
+  const eventBaskets = await buildEventBasketOpportunities(
+    all,
+    now,
+    latestEndTs,
+    allBooks,
+    bufferBps
+  );
+
+  const scanDurationMs = Date.now() - started;
+
+  return {
+    generatedAt: new Date(now).toISOString(),
+    totalActiveMarketsScanned: all.length,
+    scanDurationMs,
+    bufferBps,
+    lanes: {
+      urgent2h,
+      developing6h,
+      broader24h
+    },
+    structuralUniverse: {
+      binary: structuralBinary,
+      eventBaskets: eventBaskets.slice(0, structuralLimit),
+      executableCount:
+        structuralBinary.filter(candidate => candidate.opportunityClass === "executable_structural").length +
+        eventBaskets.filter(basket => basket.bestNetProfitUsd > 0).length,
+      topBookOnlyCount:
+        structuralBinary.filter(candidate => candidate.opportunityClass === "top_book_structural_only").length +
+        eventBaskets.filter(basket =>
+          basket.bestNetProfitUsd <= 0 &&
+          basket.flags.includes("top_book_complete_set_edge")
+        ).length
+    }
   };
 }
