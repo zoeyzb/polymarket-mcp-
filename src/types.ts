@@ -120,6 +120,11 @@ export interface ScanCandidate {
   } | null;
   opportunityClass: OpportunityClass;
   opportunityScore: number;
+  attentionScore?: number;
+  marketSignals?: {
+    priceRegime: import("./intelligence.js").PriceRegimeAnalysis | null;
+    tradeFlow: import("./intelligence.js").TradeFlowAnalysis | null;
+  };
   rapidReviewScore: number;
   scoreBreakdown: Record<string, number>;
   flags: string[];
