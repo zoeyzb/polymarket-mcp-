@@ -35,6 +35,7 @@ import {
 import { inferFinalResolution } from "./resolutions.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
+import { sportsTracker } from "./sports.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -176,6 +177,14 @@ async function runSystemAudit() {
     detail: JSON.stringify(mcpSelfTest)
   });
 
+  const sports = sportsTracker.getHealth();
+  findings.push({
+    id: "sports_feed_connection",
+    ok: sports.state === "streaming" || sports.state === "connecting",
+    severity: "warning",
+    detail: `state=${sports.state}, cachedEvents=${sports.cachedEvents}, lastError=${sports.lastError ?? "none"}`
+  });
+
   const realtime = realtimeTracker.getHealth();
   const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
   const realtimeConsistent =
@@ -200,7 +209,8 @@ async function runSystemAudit() {
       scanDurationMs: scan.scanDurationMs
     },
     persistence: integrity,
-    realtime
+    realtime,
+    sports
   };
 }
 
@@ -375,6 +385,7 @@ export function createMcpServer() {
         tradeFlow: analyzeTradeFlowPayload(trades),
         historicalEvidence: historical,
         independentExternalEvidence: await getExternalCryptoEvidence(String(market.question || "")).catch(() => null),
+        liveSportsEvidence: sportsTracker.matchQuestion(String(market.question || ""), 10),
         externalEvidenceNeeded: [
           "Verify the event state using current primary or authoritative sources.",
           "Check the exact resolution wording and source before interpreting evidence.",
@@ -382,6 +393,44 @@ export function createMcpServer() {
         ]
       });
     }
+  );
+
+  server.registerTool(
+    "sports.live_results",
+    {
+      description: "Return recent public Polymarket sports feed sport_result events containing live scores, periods, and status. Descriptive event state only.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(50)
+      }
+    },
+    async input => textResult({
+      health: sportsTracker.getHealth(),
+      events: sportsTracker.recent(input.limit)
+    })
+  );
+
+  server.registerTool(
+    "sports.match_question",
+    {
+      description: "Conservatively match a sports-market question against recent live sports feed events by significant keyword overlap. Returns raw event state and match metadata, not an outcome prediction.",
+      inputSchema: {
+        question: z.string().min(1),
+        limit: z.number().int().min(1).max(50).default(10)
+      }
+    },
+    async input => textResult({
+      question: input.question,
+      matches: sportsTracker.matchQuestion(input.question, input.limit),
+      health: sportsTracker.getHealth()
+    })
+  );
+
+  server.registerTool(
+    "system.sports_health",
+    {
+      description: "Return public Polymarket sports WebSocket connection, live-result count, reconnect, and cache health."
+    },
+    async () => textResult(sportsTracker.getHealth())
   );
 
   server.registerTool(
@@ -627,6 +676,19 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/sports-health") {
+    json(res, 200, sportsTracker.getHealth());
+    return true;
+  }
+
+  if (url.pathname === "/api/sports-results") {
+    json(res, 200, {
+      health: sportsTracker.getHealth(),
+      events: sportsTracker.recent(numberParam(url, "limit", 50, 1, 200))
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/audit") {
     const audit = await runSystemAudit();
     json(res, audit.summary.ok ? 200 : 503, audit);
@@ -733,6 +795,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       externalEvidence: "/api/external-evidence?question=Will%20Bitcoin%20be%20above%20%2485000%3F",
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
+      sportsHealth: "/api/sports-health",
+      sportsResults: "/api/sports-results?limit=50",
       audit: "/api/audit",
       mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
@@ -905,6 +969,8 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       at: new Date().toISOString()
     })));
 
+  sportsTracker.start();
+
   runBackgroundScan().catch(() => {});
   setInterval(() => {
     runBackgroundScan().catch(() => {});
@@ -918,6 +984,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
 
 function shutdown(signal: string) {
   realtimeTracker.close();
+  sportsTracker.close();
   console.log(JSON.stringify({ level: "info", message: "shutdown", signal }));
   httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
