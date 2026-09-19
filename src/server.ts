@@ -435,6 +435,21 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/external-evidence") {
+    const question = url.searchParams.get("question") || "";
+    if (!question.trim()) {
+      json(res, 400, { error: "question_required" });
+    } else {
+      json(res, 200, {
+        question,
+        evidence: await getExternalCryptoEvidence(question).catch(error => ({
+          error: errorMessage(error)
+        }))
+      });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/snapshot-health") {
     json(res, 200, getSnapshotHealth());
     return true;
@@ -536,6 +551,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
       arbitrage: "/api/arbitrage?minutes=120&limit=50",
       upstream: "/api/upstream-check",
+      externalEvidence: "/api/external-evidence?question=Will%20Bitcoin%20be%20above%20%2485000%3F",
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
       persistenceHealth: "/api/persistence-health",
