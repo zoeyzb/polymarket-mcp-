@@ -1,5 +1,7 @@
 # Polymarket MCP
 
+Current production architecture: **v0.3 intelligence engine**.
+
 A read-only Railway-hosted MCP server that scans **all active Polymarket markets resolving within at most two hours** and ranks short-dated market-structure opportunities.
 
 ## What changed in v0.2
@@ -69,3 +71,26 @@ Railway is configured to run the verification suite during build before starting
 - **Polymarket/agent-skills**: official current guidance for Gamma/CLOB data sources and batch order-book access.
 - **Model Context Protocol SDK**: Streamable HTTP transport.
 - Existing scanner code in this repository: preserved the read-only/no-wallet boundary and rewrote the opportunity logic around executable depth rather than headline prices.
+
+
+## v0.3 intelligence additions
+
+- Continuous 30-second background scans (configurable with `BACKGROUND_SCAN_SECONDS`).
+- Rolling in-process scanner snapshots and health deltas.
+- Automatic NegRisk / multi-outcome event grouping when Gamma marks the event as NegRisk.
+- Equal-share complete-outcome basket execution across 3+ outcomes, walking live ask depth.
+- Price-regime analysis for any outcome token: stable / trending / volatile / shock plus anomaly score.
+- Manual complete-outcome basket MCP calculator for advanced research.
+- Political/election markets remain structural-only; no internally generated winner forecast is produced.
+
+### Additional MCP tools
+
+- `markets.price_regime`
+- `markets.complete_outcome_basket`
+- `system.snapshot_health`
+- `system.snapshots`
+
+### Additional HTTP endpoints
+
+- `GET /api/snapshot-health`
+- `GET /api/snapshots?limit=100`
