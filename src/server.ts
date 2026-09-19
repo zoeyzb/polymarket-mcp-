@@ -21,6 +21,7 @@ import { realtimeTracker } from "./realtime.js";
 import {
   getCalibrationStats,
   getHistoricalCandidateStats,
+  getPersistenceIntegrity,
   getPersistentStats,
   getResolutionStats,
   getUnresolvedObservedMarkets,
@@ -31,6 +32,7 @@ import {
 } from "./persistence.js";
 import { inferFinalResolution } from "./resolutions.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
+import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -51,6 +53,86 @@ function textResult(value: unknown) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function runSystemAudit() {
+  const findings: AuditFinding[] = [];
+
+  const started = Date.now();
+  const scan = await scanClosingSoon({
+    maxMinutes: 120,
+    minLiquidity: 0,
+    includeOrderBooks: true,
+    limit: 500,
+    sort: "opportunity",
+    bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
+  });
+  findings.push(...auditScanResult(scan));
+
+  const maxScanMs = Math.max(1000, Number(process.env.AUDIT_MAX_SCAN_MS || 15000));
+  findings.push({
+    id: "scan_latency",
+    ok: (scan.scanDurationMs ?? Date.now() - started) <= maxScanMs,
+    severity: "warning",
+    detail: `scanDurationMs=${scan.scanDurationMs ?? Date.now() - started}, max=${maxScanMs}`
+  });
+
+  const persistenceConnection = await testPersistenceConnection().catch(error => ({
+    configured: true,
+    ok: false,
+    error: errorMessage(error)
+  }));
+  findings.push({
+    id: "persistence_connection",
+    ok: (persistenceConnection as any).ok === true,
+    severity: "critical",
+    detail: JSON.stringify(persistenceConnection)
+  });
+
+  const integrity = await getPersistenceIntegrity().catch(error => ({
+    configured: true,
+    error: errorMessage(error)
+  })) as any;
+  const maxHistoryAge = Math.max(60, Number(process.env.AUDIT_MAX_HISTORY_AGE_SECONDS || 180));
+  findings.push({
+    id: "history_freshness",
+    ok: typeof integrity.ageSeconds === "number" && integrity.ageSeconds <= maxHistoryAge,
+    severity: "critical",
+    detail: `ageSeconds=${integrity.ageSeconds ?? "unknown"}, max=${maxHistoryAge}`
+  });
+  findings.push({
+    id: "history_duplicate_timestamps",
+    ok: Number(integrity.duplicateTimestamps || 0) === 0,
+    severity: "warning",
+    detail: `duplicateTimestamps=${integrity.duplicateTimestamps ?? "unknown"}`
+  });
+
+  const realtime = realtimeTracker.getHealth();
+  const expectedTokens = new Set(scan.candidates.flatMap(candidate => candidate.tokenIds)).size;
+  const realtimeConsistent =
+    expectedTokens === 0
+      ? realtime.subscribedTokens === 0
+      : realtime.subscribedTokens === expectedTokens || realtime.state === "connecting";
+  findings.push({
+    id: "realtime_subscription_consistency",
+    ok: realtimeConsistent,
+    severity: "warning",
+    detail: `expectedTokens=${expectedTokens}, subscribedTokens=${realtime.subscribedTokens}, state=${realtime.state}`
+  });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: summarizeAudit(findings),
+    findings,
+    scan: {
+      totalActiveMarketsScanned: scan.totalActiveMarketsScanned,
+      totalInWindow: scan.totalInWindowBeforeFilters,
+      returned: scan.returned,
+      scanDurationMs: scan.scanDurationMs
+    },
+    persistence: integrity,
+    realtime
+  };
 }
 
 export function createMcpServer() {
@@ -343,6 +425,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.audit",
+    {
+      description: "Run a live end-to-end self-audit: full-universe scan invariants, execution-score bounds, persistence freshness/duplicates, latency, and realtime subscription consistency."
+    },
+    async () => textResult(await runSystemAudit())
+  );
+
+  server.registerTool(
     "system.persistence_health",
     {
       description: "Return durable Polymarket history backend status and aggregate stored scan statistics."
@@ -460,6 +550,12 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/audit") {
+    const audit = await runSystemAudit();
+    json(res, audit.summary.ok ? 200 : 503, audit);
+    return true;
+  }
+
   if (url.pathname === "/api/persistence-health") {
     json(res, 200, {
       config: persistenceConfig(),
@@ -554,6 +650,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       externalEvidence: "/api/external-evidence?question=Will%20Bitcoin%20be%20above%20%2485000%3F",
       snapshotHealth: "/api/snapshot-health",
       realtimeHealth: "/api/realtime-health",
+      audit: "/api/audit",
       persistenceHealth: "/api/persistence-health",
       calibration: "/api/calibration",
       resolutionHistory: "/api/resolution-history"
