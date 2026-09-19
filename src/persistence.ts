@@ -315,6 +315,91 @@ export async function compactRealtimeQuotes(minutesBack = 180) {
   };
 }
 
+export async function cleanupRawStreams(
+  quoteRetentionHours = 72,
+  sportsRetentionDays = 30
+) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const quoteHours = Math.max(24, Math.min(720, quoteRetentionHours));
+  const sportDays = Math.max(7, Math.min(365, sportsRetentionDays));
+  const startedAt = new Date().toISOString();
+
+  const run = await pool.query<{ id: string }>(
+    `insert into polymarket_brain.maintenance_runs (job, started_at, details)
+     values ('raw_stream_cleanup', now(), $1::jsonb)
+     returning id`,
+    [JSON.stringify({ quoteRetentionHours: quoteHours, sportsRetentionDays: sportDays })]
+  );
+  const runId = run.rows[0]?.id ?? null;
+
+  try {
+    const quoteDelete = await pool.query(
+      `delete from polymarket_brain.realtime_quotes rq
+       using polymarket_brain.quote_bars_1m bar
+       where rq.token_id = bar.token_id
+         and date_trunc('minute', rq.observed_at) = bar.minute
+         and rq.observed_at < now() - ($1 || ' hours')::interval`,
+      [quoteHours]
+    );
+
+    const sportsDelete = await pool.query(
+      `delete from polymarket_brain.sports_events
+       where received_at < now() - ($1 || ' days')::interval`,
+      [sportDays]
+    );
+
+    const result = {
+      configured: true,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      quoteRetentionHours: quoteHours,
+      sportsRetentionDays: sportDays,
+      deletedRealtimeQuotes: quoteDelete.rowCount ?? 0,
+      deletedSportsEvents: sportsDelete.rowCount ?? 0
+    };
+
+    if (runId) {
+      await pool.query(
+        `update polymarket_brain.maintenance_runs
+         set finished_at = now(), details = details || $2::jsonb
+         where id = $1`,
+        [runId, JSON.stringify(result)]
+      );
+    }
+
+    return result;
+  } catch (error) {
+    if (runId) {
+      await pool.query(
+        `update polymarket_brain.maintenance_runs
+         set finished_at = now(), details = details || $2::jsonb
+         where id = $1`,
+        [runId, JSON.stringify({
+          error: error instanceof Error ? error.message : String(error)
+        })]
+      ).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+export async function getMaintenanceStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      count(*)::int as "runs",
+      max(finished_at) as "lastFinishedAt",
+      coalesce(sum((details->>'deletedRealtimeQuotes')::int)
+        filter (where details ? 'deletedRealtimeQuotes'), 0)::int as "deletedRealtimeQuotes",
+      coalesce(sum((details->>'deletedSportsEvents')::int)
+        filter (where details ? 'deletedSportsEvents'), 0)::int as "deletedSportsEvents"
+    from polymarket_brain.maintenance_runs
+    where job = 'raw_stream_cleanup'
+  `);
+  return { configured: true, ...rows[0] };
+}
+
 export async function getStreamPersistenceStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
