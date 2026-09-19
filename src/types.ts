@@ -120,6 +120,8 @@ export interface ScanCandidate {
     bestNetRoiPct: number | null;
     note: string;
   } | null;
+  categories: import("./category-taxonomy.js").MarketCategory[];
+  primaryCategory: import("./category-taxonomy.js").MarketCategory;
   opportunityClass: OpportunityClass;
   opportunityScore: number;
   attentionScore?: number;
@@ -175,12 +177,14 @@ export interface MultiHorizonLane {
   maxMinutes: number;
   totalInWindow: number;
   returned: number;
+  categoryCounts: Record<string, number>;
   candidates: ScanCandidate[];
 }
 
 export interface StructuralUniverseResult {
   binary: ScanCandidate[];
   eventBaskets: EventBasketOpportunity[];
+  categoryCounts: Record<string, number>;
   executableCount: number;
   topBookOnlyCount: number;
 }
