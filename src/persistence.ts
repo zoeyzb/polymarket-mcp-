@@ -1,5 +1,7 @@
 import pg from "pg";
 import type { ScanResult } from "./types.js";
+import type { RealtimeQuote } from "./realtime.js";
+import type { SportsFeedEvent } from "./sports.js";
 
 const { Pool } = pg;
 
@@ -170,6 +172,101 @@ export async function persistScan(scan: ScanResult) {
   } finally {
     client.release();
   }
+}
+
+export async function persistRealtimeQuotes(quotes: RealtimeQuote[]) {
+  if (!pool) return { configured: false, reason: "not_configured", inserted: 0 };
+  if (!quotes.length) return { configured: true, inserted: 0 };
+
+  const payload = quotes.slice(0, 2000).map(quote => ({
+    observed_at: quote.updatedAt,
+    token_id: quote.tokenId,
+    best_bid: quote.bestBid,
+    best_ask: quote.bestAsk,
+    spread: quote.spread,
+    last_trade_price: quote.lastTradePrice,
+    last_trade_side: quote.lastTradeSide,
+    event_type: quote.eventType,
+    payload: quote
+  }));
+
+  const { rowCount } = await pool.query(
+    `insert into polymarket_brain.realtime_quotes (
+       observed_at, token_id, best_bid, best_ask, spread,
+       last_trade_price, last_trade_side, event_type, payload
+     )
+     select
+       x.observed_at::timestamptz,
+       x.token_id,
+       x.best_bid,
+       x.best_ask,
+       x.spread,
+       x.last_trade_price,
+       x.last_trade_side,
+       x.event_type,
+       x.payload
+     from jsonb_to_recordset($1::jsonb) as x(
+       observed_at text,
+       token_id text,
+       best_bid numeric,
+       best_ask numeric,
+       spread numeric,
+       last_trade_price numeric,
+       last_trade_side text,
+       event_type text,
+       payload jsonb
+     )`,
+    [JSON.stringify(payload)]
+  );
+
+  return { configured: true, inserted: rowCount ?? 0 };
+}
+
+export async function persistSportsEvents(events: SportsFeedEvent[]) {
+  if (!pool) return { configured: false, reason: "not_configured", inserted: 0 };
+  if (!events.length) return { configured: true, inserted: 0 };
+
+  const payload = events.slice(0, 2000).map(event => ({
+    received_at: event.receivedAt,
+    payload: event.payload
+  }));
+
+  const { rowCount } = await pool.query(
+    `insert into polymarket_brain.sports_events (received_at, payload)
+     select x.received_at::timestamptz, x.payload
+     from jsonb_to_recordset($1::jsonb) as x(
+       received_at text,
+       payload jsonb
+     )`,
+    [JSON.stringify(payload)]
+  );
+
+  return { configured: true, inserted: rowCount ?? 0 };
+}
+
+export async function getStreamPersistenceStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const { rows } = await pool.query(`
+    select
+      (select count(*)::int from polymarket_brain.realtime_quotes) as "realtimeQuoteRows",
+      (select max(observed_at) from polymarket_brain.realtime_quotes) as "lastRealtimeQuoteAt",
+      (select count(*)::int from polymarket_brain.sports_events) as "sportsEventRows",
+      (select max(received_at) from polymarket_brain.sports_events) as "lastSportsEventAt"
+  `);
+
+  const row = rows[0] || {};
+  return {
+    configured: true,
+    realtimeQuoteRows: Number(row.realtimeQuoteRows || 0),
+    lastRealtimeQuoteAt: row.lastRealtimeQuoteAt
+      ? new Date(row.lastRealtimeQuoteAt).toISOString()
+      : null,
+    sportsEventRows: Number(row.sportsEventRows || 0),
+    lastSportsEventAt: row.lastSportsEventAt
+      ? new Date(row.lastSportsEventAt).toISOString()
+      : null
+  };
 }
 
 export async function getPersistentStats() {
