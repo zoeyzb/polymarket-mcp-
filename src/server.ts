@@ -18,6 +18,7 @@ import { scanBinaryArbitrage, scanClosingSoon, scanOpportunities } from "./scann
 import { analyzePriceHistoryPayload, analyzeTradeFlowPayload, calculateCompleteOutcomeBasket } from "./intelligence.js";
 import { getSnapshotHealth, getSnapshots } from "./snapshots.js";
 import { realtimeTracker } from "./realtime.js";
+import { getPersistentStats, persistScan, persistenceConfig } from "./persistence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -225,6 +226,19 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.persistence_health",
+    {
+      description: "Return durable Polymarket history backend status and aggregate stored scan statistics."
+    },
+    async () => textResult({
+      config: persistenceConfig(),
+      stats: await getPersistentStats().catch(error => ({
+        error: errorMessage(error)
+      }))
+    })
+  );
+
+  server.registerTool(
     "system.snapshot_health",
     {
       description: "Return rolling in-process scanner health and deltas across recent scans."
@@ -313,6 +327,14 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/persistence-health") {
+    json(res, 200, {
+      config: persistenceConfig(),
+      stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) }))
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/snapshots") {
     json(res, 200, getSnapshots(numberParam(url, "limit", 100, 1, 500)));
     return true;
@@ -386,7 +408,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       arbitrage: "/api/arbitrage?minutes=120&limit=50",
       upstream: "/api/upstream-check",
       snapshotHealth: "/api/snapshot-health",
-      realtimeHealth: "/api/realtime-health"
+      realtimeHealth: "/api/realtime-health",
+      persistenceHealth: "/api/persistence-health"
     });
     return true;
   }
@@ -447,6 +470,16 @@ async function runBackgroundScan() {
       sort: "opportunity",
       bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
     });
+
+    await persistScan(scan).catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "persistence_write_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      }));
+    });
+
     const tokens = new Set<string>();
     for (const candidate of scan.candidates) {
       for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
