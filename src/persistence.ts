@@ -2,6 +2,7 @@ import pg from "pg";
 import type { ScanResult } from "./types.js";
 import type { RealtimeQuote } from "./realtime.js";
 import type { SportsFeedEvent } from "./sports.js";
+import type { HistoricalCalibrationSample } from "./historical-calibration.js";
 
 const { Pool } = pg;
 
@@ -482,6 +483,94 @@ export async function getAlertStats() {
     from polymarket_brain.signal_alerts
   `);
   return { configured: true, ...rows[0] };
+}
+
+export async function upsertHistoricalCalibrationSample(sample: HistoricalCalibrationSample) {
+  if (!pool) return { configured: false, reason: "not_configured", upserted: 0 };
+
+  const result = await pool.query(
+    `insert into polymarket_brain.historical_calibration (
+       condition_id, market_id, slug, question, domain, resolved_at,
+       outcome0, outcome1, actual_outcome0, winning_outcome, token0_id,
+       prices, brier, source_payload, updated_at
+     ) values (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,now()
+     )
+     on conflict (condition_id) do update set
+       market_id = excluded.market_id,
+       slug = excluded.slug,
+       question = excluded.question,
+       domain = excluded.domain,
+       resolved_at = excluded.resolved_at,
+       outcome0 = excluded.outcome0,
+       outcome1 = excluded.outcome1,
+       actual_outcome0 = excluded.actual_outcome0,
+       winning_outcome = excluded.winning_outcome,
+       token0_id = excluded.token0_id,
+       prices = excluded.prices,
+       brier = excluded.brier,
+       source_payload = excluded.source_payload,
+       updated_at = now()`,
+    [
+      sample.conditionId,
+      sample.marketId,
+      sample.slug,
+      sample.question,
+      sample.domain,
+      sample.resolvedAt,
+      sample.outcome0,
+      sample.outcome1,
+      sample.actualOutcome0,
+      sample.winningOutcome,
+      sample.token0Id,
+      JSON.stringify(sample.prices),
+      JSON.stringify(sample.brier),
+      JSON.stringify(sample.sourcePayload)
+    ]
+  );
+
+  return { configured: true, upserted: result.rowCount ?? 0 };
+}
+
+export async function getHistoricalCalibrationSummary() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const totals = await pool.query(`
+    select
+      count(*)::int as "sampleCount",
+      count(*) filter (where domain='sports')::int as "sportsSamples",
+      count(*) filter (where domain='crypto')::int as "cryptoSamples",
+      count(*) filter (where domain='weather')::int as "weatherSamples",
+      min(resolved_at) as "firstResolvedAt",
+      max(resolved_at) as "lastResolvedAt"
+    from polymarket_brain.historical_calibration
+  `);
+
+  const horizons = await pool.query(`
+    with expanded as (
+      select
+        domain,
+        kv.key as horizon,
+        (kv.value #>> '{}')::numeric as brier
+      from polymarket_brain.historical_calibration h
+      cross join lateral jsonb_each(h.brier) kv
+    )
+    select
+      domain,
+      horizon,
+      count(*)::int as samples,
+      round(avg(brier), 6)::float8 as "meanBrier",
+      round(percentile_cont(0.5) within group (order by brier)::numeric, 6)::float8 as "medianBrier"
+    from expanded
+    group by domain, horizon
+    order by domain, horizon
+  `);
+
+  return {
+    configured: true,
+    ...totals.rows[0],
+    horizons: horizons.rows
+  };
 }
 
 export async function getPersistentStats() {
