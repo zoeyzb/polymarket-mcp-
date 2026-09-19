@@ -11,6 +11,7 @@ import {
   getOrderBooks,
   getPriceHistory,
   getRecentTrades,
+  listClosedMarketsEndingBetween,
   parseNumberArray,
   parseStringArray,
   searchActiveMarkets,
@@ -24,7 +25,9 @@ import {
   compactRealtimeQuotes,
   getAlertStats,
   getCalibrationStats,
+  getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
+  getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
   getPersistentStats,
   getRecentAlerts,
@@ -37,12 +40,14 @@ import {
   persistSportsEvents,
   persistenceConfig,
   recordResolution,
-  testPersistenceConnection
+  testPersistenceConnection,
+  upsertHistoricalCalibrationSample
 } from "./persistence.js";
 import { inferFinalResolution } from "./resolutions.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
+import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -590,6 +595,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.historical_calibration",
+    {
+      description: "Return historical non-political calibration statistics from resolved sports, crypto, and weather markets at fixed pre-close horizons. Reports empirical Brier error only; no future outcome recommendation."
+    },
+    async () => textResult(await getHistoricalCalibrationSummary())
+  );
+
+  server.registerTool(
     "system.calibration",
     {
       description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
@@ -777,6 +790,13 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/historical-calibration") {
+    json(res, 200, await getHistoricalCalibrationSummary().catch(error => ({
+      error: errorMessage(error)
+    })));
+    return true;
+  }
+
   if (url.pathname === "/api/calibration") {
     json(res, 200, await getCalibrationStats().catch(error => ({ error: errorMessage(error) })));
     return true;
@@ -869,6 +889,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       persistenceHealth: "/api/persistence-health",
       alerts: "/api/alerts?limit=100",
       calibration: "/api/calibration",
+      historicalCalibration: "/api/historical-calibration",
       resolutionHistory: "/api/resolution-history"
     });
     return true;
@@ -919,10 +940,14 @@ let backgroundScanRunning = false;
 let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
 let quoteCompactionRunning = false;
+let historicalBackfillRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(15, Number(process.env.BACKGROUND_SCAN_SECONDS || 30));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
 const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTION_SECONDS || 60));
+const HISTORICAL_BACKFILL_SECONDS = Math.max(300, Number(process.env.HISTORICAL_BACKFILL_SECONDS || 900));
+const HISTORICAL_LOOKBACK_HOURS = Math.max(6, Math.min(168, Number(process.env.HISTORICAL_LOOKBACK_HOURS || 48)));
+const HISTORICAL_BACKFILL_LIMIT = Math.max(1, Math.min(100, Number(process.env.HISTORICAL_BACKFILL_LIMIT || 40)));
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -1033,6 +1058,71 @@ async function runQuoteCompactionWorker() {
   }
 }
 
+async function runHistoricalBackfillWorker() {
+  if (historicalBackfillRunning) return;
+  historicalBackfillRunning = true;
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - HISTORICAL_LOOKBACK_HOURS * 3600_000);
+    const closedMarkets = await listClosedMarketsEndingBetween(start, end, 5, 100);
+    const eligible = closedMarkets.filter(market =>
+      Boolean(market.conditionId) && classifyHistoricalDomain(market) !== null
+    );
+
+    const conditionIds = eligible
+      .map(market => String(market.conditionId || ""))
+      .filter(Boolean);
+    const known = await getKnownHistoricalCalibrationIds(conditionIds);
+    const pending = eligible
+      .filter(market => !known.has(String(market.conditionId || "")))
+      .slice(0, HISTORICAL_BACKFILL_LIMIT);
+
+    let stored = 0;
+    let skipped = 0;
+
+    for (let i = 0; i < pending.length; i += 4) {
+      const batch = pending.slice(i, i + 4);
+      const samples = await Promise.all(batch.map(async market => {
+        try {
+          return await buildHistoricalCalibrationSample(market);
+        } catch {
+          return null;
+        }
+      }));
+
+      for (const sample of samples) {
+        if (!sample) {
+          skipped += 1;
+          continue;
+        }
+        await upsertHistoricalCalibrationSample(sample);
+        stored += 1;
+      }
+    }
+
+    console.log(JSON.stringify({
+      level: "info",
+      message: "historical_calibration_backfill",
+      lookbackHours: HISTORICAL_LOOKBACK_HOURS,
+      closedMarkets: closedMarkets.length,
+      eligible: eligible.length,
+      pending: pending.length,
+      stored,
+      skipped,
+      at: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "historical_calibration_backfill_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    historicalBackfillRunning = false;
+  }
+}
+
 async function runResolutionWorker() {
   if (resolutionWorkerRunning) return;
   resolutionWorkerRunning = true;
@@ -1129,6 +1219,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   setInterval(() => {
     runResolutionWorker().catch(() => {});
   }, RESOLUTION_CHECK_SECONDS * 1000).unref();
+
+  runHistoricalBackfillWorker().catch(() => {});
+  setInterval(() => {
+    runHistoricalBackfillWorker().catch(() => {});
+  }, HISTORICAL_BACKFILL_SECONDS * 1000).unref();
 });
 
 function shutdown(signal: string) {
