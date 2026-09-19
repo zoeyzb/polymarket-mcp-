@@ -1,10 +1,16 @@
 import {
   getOrderBooks,
+  getPriceHistory,
+  getRecentTrades,
   listAllActiveMarkets,
   parseNumberArray,
   parseStringArray
 } from "./polymarket.js";
-import { calculateCompleteOutcomeBasket } from "./intelligence.js";
+import {
+  analyzePriceHistoryPayload,
+  analyzeTradeFlowPayload,
+  calculateCompleteOutcomeBasket
+} from "./intelligence.js";
 import { recordSnapshot } from "./snapshots.js";
 import type {
   CompleteSetExecution,
@@ -431,6 +437,64 @@ async function enrichMarket(
   };
 }
 
+async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
+  const limit = Math.max(0, Math.min(200, Number(process.env.SIGNAL_ENRICH_LIMIT || 100)));
+  const targets = [...candidates]
+    .sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || b.liquidityUsd - a.liquidityUsd)
+    .slice(0, limit);
+
+  const queue = [...targets];
+  const concurrency = Math.max(1, Math.min(20, Number(process.env.SIGNAL_ENRICH_CONCURRENCY || 8)));
+
+  async function worker() {
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate) return;
+
+      const tokenId = candidate.tokenIds[0];
+      const conditionId = candidate.conditionId;
+
+      const [historyPayload, tradePayload] = await Promise.all([
+        tokenId
+          ? getPriceHistory(tokenId, 6, 5).catch(() => null)
+          : Promise.resolve(null),
+        conditionId
+          ? getRecentTrades(conditionId, 100).catch(() => null)
+          : Promise.resolve(null)
+      ]);
+
+      const priceRegime = historyPayload ? analyzePriceHistoryPayload(historyPayload) : null;
+      const tradeFlow = tradePayload ? analyzeTradeFlowPayload(tradePayload) : null;
+
+      candidate.marketSignals = { priceRegime, tradeFlow };
+
+      const regimeBoost = priceRegime ? priceRegime.anomalyScore * 0.25 : 0;
+      const flowBoost = tradeFlow ? tradeFlow.flowScore * 0.15 : 0;
+      candidate.attentionScore = round(
+        Math.min(100, candidate.opportunityScore + regimeBoost + flowBoost),
+        1
+      );
+
+      if (priceRegime?.regime === "shock") candidate.flags.push("price_shock");
+      else if (priceRegime?.regime === "volatile") candidate.flags.push("high_price_volatility");
+      else if (priceRegime?.regime === "trending") candidate.flags.push("price_trend");
+
+      if (tradeFlow && Math.abs(tradeFlow.signedImbalance) >= 0.7 && tradeFlow.totalUsd >= 100) {
+        candidate.flags.push("strong_recent_trade_imbalance");
+      }
+      if (tradeFlow && tradeFlow.largestTradeUsd >= 1000) {
+        candidate.flags.push("large_recent_trade");
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length || 1) }, worker));
+
+  for (const candidate of candidates) {
+    if (candidate.attentionScore === undefined) candidate.attentionScore = candidate.opportunityScore;
+  }
+}
+
 export async function scanClosingSoon(options?: {
   maxMinutes?: number;
   minLiquidity?: number;
@@ -470,8 +534,16 @@ export async function scanClosingSoon(options?: {
     inWindow.map(m => enrichMarket(m, now, includeOrderBooks, allBooks, bufferBps))
   )).filter((x): x is ScanCandidate => x !== null);
 
+  if (includeOrderBooks && enriched.length) {
+    await enrichBehaviorSignals(enriched);
+  }
+
   if (sort === "opportunity") {
-    enriched.sort((a, b) => b.opportunityScore - a.opportunityScore || a.minutesRemaining - b.minutesRemaining);
+    enriched.sort((a, b) =>
+      b.opportunityScore - a.opportunityScore ||
+      (b.attentionScore ?? 0) - (a.attentionScore ?? 0) ||
+      a.minutesRemaining - b.minutesRemaining
+    );
   } else if (sort === "review_score") {
     enriched.sort((a, b) => b.rapidReviewScore - a.rapidReviewScore || a.minutesRemaining - b.minutesRemaining);
   } else if (sort === "liquidity") {
