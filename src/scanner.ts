@@ -16,6 +16,7 @@ import { recordSnapshot } from "./snapshots.js";
 import { getHistoricalCandidateStats } from "./persistence.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { isPoliticalCandidate, isPoliticalMarket } from "./domain-policy.js";
+import { classifyMarketCategories, primaryMarketCategory } from "./category-taxonomy.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -468,6 +469,9 @@ async function enrichMarket(
     executions: BUDGETS.map(budget => executionEstimate(book, budget))
   }));
 
+  const categories = classifyMarketCategories(market, now);
+  const primaryCategory = primaryMarketCategory(categories);
+
   return {
     id: market.id ? String(market.id) : null,
     slug: market.slug ? String(market.slug) : null,
@@ -487,6 +491,8 @@ async function enrichMarket(
     url: market.slug ? `https://polymarket.com/event/${market.slug}` : null,
     books: includeBooks ? marketBooks : undefined,
     binaryArbitrage,
+    categories,
+    primaryCategory,
     opportunityClass: opportunity.opportunityClass,
     opportunityScore: opportunity.opportunityScore,
     rapidReviewScore: scoring.score,
@@ -819,6 +825,18 @@ function sortCandidates(candidates: ScanCandidate[], sort: "soonest" | "review_s
   return candidates;
 }
 
+function categoryCounts(candidates: ScanCandidate[]) {
+  const counts: Record<string, number> = {};
+  for (const candidate of candidates) {
+    for (const category of candidate.categories) {
+      counts[category] = (counts[category] || 0) + 1;
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  );
+}
+
 function buildLane(
   key: MultiHorizonLane["key"],
   maxMinutes: number,
@@ -834,6 +852,7 @@ function buildLane(
     maxMinutes,
     totalInWindow: candidates.length,
     returned: Math.min(limit, candidates.length),
+    categoryCounts: categoryCounts(candidates),
     candidates: candidates.slice(0, limit)
   };
 }
@@ -931,6 +950,7 @@ export async function scanMultiHorizon(options?: {
     structuralUniverse: {
       binary: structuralBinary,
       eventBaskets: eventBaskets.slice(0, structuralLimit),
+      categoryCounts: categoryCounts(structuralBinary),
       executableCount:
         structuralBinary.filter(candidate => candidate.opportunityClass === "executable_structural").length +
         eventBaskets.filter(basket => basket.bestNetProfitUsd > 0).length,
