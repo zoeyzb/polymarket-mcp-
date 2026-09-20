@@ -55,39 +55,44 @@ export function parseNumberArray(value: unknown): number[] {
 let activeMarketCache: { at: number; markets: GammaMarket[] } | null = null;
 const ACTIVE_CACHE_MS = Math.max(0, Number(process.env.ACTIVE_MARKET_CACHE_MS || 15000));
 
-export async function listAllActiveMarkets(maxPages = 1000, pageSize = 100): Promise<GammaMarket[]> {
+type GammaKeysetResponse = {
+  markets?: GammaMarket[];
+  next_cursor?: string;
+};
+
+export async function listAllActiveMarkets(maxPages = 2000, pageSize = 100): Promise<GammaMarket[]> {
   if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
     return activeMarketCache.markets;
   }
 
   const byKey = new Map<string, GammaMarket>();
+  const boundedPageSize = Math.max(1, Math.min(100, pageSize));
+  let cursor = "";
+  const seenCursors = new Set<string>();
 
   for (let page = 0; page < maxPages; page++) {
-    const offset = page * pageSize;
     const params = new URLSearchParams({
-      active: "true",
       closed: "false",
-      limit: String(pageSize),
-      offset: String(offset)
+      limit: String(boundedPageSize)
     });
+    if (cursor) params.set("after_cursor", cursor);
 
-    let batch: GammaMarket[];
-    try {
-      batch = await fetchJson<GammaMarket[]>(`${GAMMA_BASE}/markets?${params}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (page > 0 && message.includes("422")) break;
-      throw error;
-    }
-
-    if (!Array.isArray(batch) || batch.length === 0) break;
+    const payload = await fetchJson<GammaKeysetResponse>(
+      `${GAMMA_BASE}/markets/keyset?${params}`
+    );
+    const batch = Array.isArray(payload?.markets) ? payload.markets : [];
+    if (!batch.length) break;
 
     for (const market of batch) {
+      if (market.active === false || market.closed === true) continue;
       const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
       byKey.set(key, market);
     }
 
-    if (batch.length < pageSize) break;
+    const next = String(payload.next_cursor || "");
+    if (!next || next === cursor || seenCursors.has(next)) break;
+    seenCursors.add(next);
+    cursor = next;
   }
 
   const markets = [...byKey.values()];
