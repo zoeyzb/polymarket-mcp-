@@ -309,10 +309,72 @@ export async function compactRealtimeQuotes(minutesBack = 180) {
     [boundedMinutes]
   );
 
+  const fiveMinute = await pool.query(
+    `with bucketed as (
+       select
+         token_id,
+         to_timestamp(floor(extract(epoch from minute) / 300) * 300) as bucket,
+         minute,
+         open_mid,
+         high_mid,
+         low_mid,
+         close_mid,
+         avg_spread,
+         min_spread,
+         max_spread,
+         sample_count,
+         first_observed_at,
+         last_observed_at
+       from polymarket_brain.quote_bars_1m
+       where minute >= now() - ($1 || ' minutes')::interval
+     ),
+     grouped as (
+       select
+         token_id,
+         bucket,
+         (array_agg(open_mid order by minute asc) filter (where open_mid is not null))[1] as open_mid,
+         max(high_mid) as high_mid,
+         min(low_mid) as low_mid,
+         (array_agg(close_mid order by minute desc) filter (where close_mid is not null))[1] as close_mid,
+         sum(avg_spread * sample_count) / nullif(sum(sample_count),0) as avg_spread,
+         min(min_spread) as min_spread,
+         max(max_spread) as max_spread,
+         sum(sample_count)::int as sample_count,
+         min(first_observed_at) as first_observed_at,
+         max(last_observed_at) as last_observed_at
+       from bucketed
+       group by token_id, bucket
+     )
+     insert into polymarket_brain.quote_bars_5m (
+       token_id, bucket, open_mid, high_mid, low_mid, close_mid,
+       avg_spread, min_spread, max_spread, sample_count,
+       first_observed_at, last_observed_at, updated_at
+     )
+     select
+       token_id, bucket, open_mid, high_mid, low_mid, close_mid,
+       avg_spread, min_spread, max_spread, sample_count,
+       first_observed_at, last_observed_at, now()
+     from grouped
+     on conflict (token_id, bucket) do update set
+       open_mid = excluded.open_mid,
+       high_mid = excluded.high_mid,
+       low_mid = excluded.low_mid,
+       close_mid = excluded.close_mid,
+       avg_spread = excluded.avg_spread,
+       min_spread = excluded.min_spread,
+       max_spread = excluded.max_spread,
+       sample_count = excluded.sample_count,
+       first_observed_at = excluded.first_observed_at,
+       last_observed_at = excluded.last_observed_at,
+       updated_at = now()`,
+    [boundedMinutes]
+  );
+
   return {
     configured: true,
     minutesBack: boundedMinutes,
-    barsUpserted: rowCount ?? 0
+    barsUpserted: rowCount ?? 0,
+    bars5mUpserted: fiveMinute.rowCount ?? 0
   };
 }
 
@@ -496,7 +558,9 @@ export async function getStreamPersistenceStats() {
       (select count(*)::int from polymarket_brain.sports_events) as "sportsEventRows",
       (select max(received_at) from polymarket_brain.sports_events) as "lastSportsEventAt",
       (select count(*)::int from polymarket_brain.quote_bars_1m) as "quoteBarRows",
-      (select max(minute) from polymarket_brain.quote_bars_1m) as "lastQuoteBarMinute"
+      (select max(minute) from polymarket_brain.quote_bars_1m) as "lastQuoteBarMinute",
+      (select count(*)::int from polymarket_brain.quote_bars_5m) as "quoteBar5mRows",
+      (select max(bucket) from polymarket_brain.quote_bars_5m) as "lastQuoteBar5mBucket"
   `);
 
   const row = rows[0] || {};
@@ -513,8 +577,56 @@ export async function getStreamPersistenceStats() {
     quoteBarRows: Number(row.quoteBarRows || 0),
     lastQuoteBarMinute: row.lastQuoteBarMinute
       ? new Date(row.lastQuoteBarMinute).toISOString()
+      : null,
+    quoteBar5mRows: Number(row.quoteBar5mRows || 0),
+    lastQuoteBar5mBucket: row.lastQuoteBar5mBucket
+      ? new Date(row.lastQuoteBar5mBucket).toISOString()
       : null
   };
+}
+
+export async function getQuoteBars(
+  tokenId: string,
+  interval: "1m" | "5m" = "5m",
+  hours = 24,
+  limit = 500
+) {
+  if (!pool) return [];
+  const boundedHours = Math.max(1, Math.min(24 * 30, hours));
+  const boundedLimit = Math.max(1, Math.min(5000, limit));
+  const table = interval === "1m"
+    ? "polymarket_brain.quote_bars_1m"
+    : "polymarket_brain.quote_bars_5m";
+  const timeColumn = interval === "1m" ? "minute" : "bucket";
+
+  const { rows } = await pool.query(
+    `select
+       token_id as "tokenId",
+       ${timeColumn} as "time",
+       open_mid::float8 as "open",
+       high_mid::float8 as "high",
+       low_mid::float8 as "low",
+       close_mid::float8 as "close",
+       avg_spread::float8 as "avgSpread",
+       min_spread::float8 as "minSpread",
+       max_spread::float8 as "maxSpread",
+       sample_count as "sampleCount",
+       first_observed_at as "firstObservedAt",
+       last_observed_at as "lastObservedAt"
+     from ${table}
+     where token_id = $1
+       and ${timeColumn} >= now() - ($2 || ' hours')::interval
+     order by ${timeColumn} desc
+     limit $3`,
+    [tokenId, boundedHours, boundedLimit]
+  );
+
+  return rows.reverse().map(row => ({
+    ...row,
+    time: row.time ? new Date(row.time).toISOString() : null,
+    firstObservedAt: row.firstObservedAt ? new Date(row.firstObservedAt).toISOString() : null,
+    lastObservedAt: row.lastObservedAt ? new Date(row.lastObservedAt).toISOString() : null
+  }));
 }
 
 type AlertSpec = {
