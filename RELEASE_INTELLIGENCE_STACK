@@ -1,8 +1,8 @@
-release=2026-09-20T03:00Z
-verified_head=bd2d50549ad04626cbc0fc8ded6153aa5fed1b5a
+release=2026-09-20T03:52Z
+verified_head=1b0f5693f6e12dedb901f7165b8920c7dd0ff2b2
 typecheck=passed
 tests=passed
 build=passed
-features=chunked-full-universe-enrichment,neg-risk-local-books,5m-markets,5m-charts,wallet-control-plane
+features=streamed-gamma-pages,streamed-clob-enrichment,compact-retention,neg-risk-local-books,5m-markets,5m-charts,wallet-control-plane
 trading_enabled=false
 trade_intents_enabled=false
