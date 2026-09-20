@@ -55,6 +55,21 @@ export function getEndDate(market: GammaMarket): string | null {
   return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
 }
 
+export function getMarketWindowMinutes(market: GammaMarket): number | null {
+  const event = Array.isArray(market.events) && market.events.length
+    ? market.events[0] as Record<string, unknown>
+    : {};
+  const startRaw =
+    (market as any).eventStartTime ??
+    event.startTime ??
+    null;
+  const endRaw = market.endDate ?? null;
+  const startTs = typeof startRaw === "string" ? Date.parse(startRaw) : NaN;
+  const endTs = typeof endRaw === "string" ? Date.parse(endRaw) : NaN;
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return null;
+  return (endTs - startTs) / 60000;
+}
+
 function sortedAsks(book: NormalizedBook) {
   return Array.isArray(book.raw.asks)
     ? book.raw.asks
@@ -421,8 +436,14 @@ async function enrichMarket(
   const endDate = getEndDate(market);
   if (!endDate) return null;
   const endTs = Date.parse(endDate);
-  const minutesRemaining = (endTs - now) / 60000;
-  if (minutesRemaining < 0) return null;
+  const rawMinutesRemaining = (endTs - now) / 60000;
+  if (rawMinutesRemaining < 0 && market.acceptingOrders === false) return null;
+  const minutesRemaining = Math.max(0, rawMinutesRemaining);
+  const marketWindowMinutes = getMarketWindowMinutes(market);
+  const isFiveMinuteMarket =
+    marketWindowMinutes !== null &&
+    marketWindowMinutes >= 4 &&
+    marketWindowMinutes <= 6;
 
   const tokenIds = parseStringArray(market.clobTokenIds);
   const outcomes = parseStringArray(market.outcomes);
@@ -485,6 +506,8 @@ async function enrichMarket(
     conditionId: market.conditionId ? String(market.conditionId) : null,
     endDate,
     minutesRemaining: round(minutesRemaining, 2),
+    marketWindowMinutes: marketWindowMinutes === null ? null : round(marketWindowMinutes, 3),
+    isFiveMinuteMarket,
     acceptingOrders: market.acceptingOrders !== false,
     liquidityUsd: round(n(market.liquidityNum ?? market.liquidity), 2),
     volumeUsd: round(n(market.volumeNum ?? market.volume), 2),
@@ -505,7 +528,11 @@ async function enrichMarket(
     scoreBreakdown: scoring.breakdown,
     flags: [
       ...scoring.flags,
-      ...(isPoliticalMarket(market) ? ["political_structural_only"] : [])
+      ...(isPoliticalMarket(market) ? ["political_structural_only"] : []),
+      ...(isFiveMinuteMarket ? ["five_minute_market"] : []),
+      ...(rawMinutesRemaining < 0 && market.acceptingOrders !== false
+        ? ["scheduled_end_passed_orders_still_open"]
+        : [])
     ]
   };
 
