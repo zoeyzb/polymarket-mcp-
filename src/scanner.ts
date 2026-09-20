@@ -1152,16 +1152,8 @@ function gammaSuggestsBookCheck(market: GammaMarket) {
   const prices = parseNumberArray(market.outcomePrices);
   if (prices.length === 2) {
     const total = prices[0] + prices[1];
-    if (total < 0.985 || total > 1.015) return true;
+    return total < 0.985 || total > 1.015;
   }
-
-  const spread = n((market as any).spread);
-  const bestBid = n((market as any).bestBid);
-  const bestAsk = n((market as any).bestAsk);
-  if (spread > 0 && spread <= 0.015 && bestBid > 0 && bestAsk > 0) {
-    return true;
-  }
-
   return false;
 }
 
