@@ -1,0 +1,7 @@
+
+> zoey-polymarket-mcp@0.4.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+src/server.ts(786,37): error TS2304: Cannot find name 'getPriceBucketCalibration'.
+src/server.ts(1027,26): error TS2304: Cannot find name 'getPriceBucketCalibration'.
+src/server.ts(1030,14): error TS7006: Parameter 'error' implicitly has an 'any' type.
