@@ -1121,3 +1121,172 @@ export async function scanMultiHorizon(options?: {
   limitPerLane?: number;
   structuralLimit?: number;
   bufferBps?: number;
+}): Promise<MultiHorizonScanResult> {
+  const started = Date.now();
+  const now = started;
+  const minLiquidity = Math.max(0, options?.minLiquidity ?? 0);
+  const limitPerLane = Math.min(500, Math.max(1, options?.limitPerLane ?? 100));
+  const structuralLimit = Math.min(500, Math.max(1, options?.structuralLimit ?? 200));
+  const bufferBps = Math.max(0, options?.bufferBps ?? DEFAULT_BUFFER_BPS);
+
+  let totalActiveMarketsScanned = 0;
+  let eligibleMarketsScanned = 0;
+  let latestEndTs = now;
+
+  const retained: ScanCandidate[] = [];
+  const negRiskMarkets: GammaMarket[] = [];
+
+  for await (const page of iterateActiveMarketPages()) {
+    totalActiveMarketsScanned += page.length;
+
+    const eligible = page.filter(market =>
+      market.active !== false &&
+      market.closed !== true &&
+      market.acceptingOrders !== false &&
+      n(market.liquidityNum ?? market.liquidity) >= minLiquidity
+    );
+    eligibleMarketsScanned += eligible.length;
+    if (!eligible.length) continue;
+
+    for (const market of eligible) {
+      const end = getEndDate(market);
+      if (end) {
+        const ts = Date.parse(end);
+        if (Number.isFinite(ts)) latestEndTs = Math.max(latestEndTs, ts);
+      }
+      const meta = eventMeta(market);
+      if (meta?.negRisk && !meta.augmented) negRiskMarkets.push(market);
+    }
+
+    const tokenIds = [...new Set(
+      eligible.flatMap(market => parseStringArray(market.clobTokenIds))
+    )];
+    const pageBooks = await getOrderBooks(tokenIds);
+
+    const pageCandidates = (await Promise.all(
+      eligible.map(market => enrichMarket(market, now, true, pageBooks, bufferBps))
+    )).filter((candidate): candidate is ScanCandidate => candidate !== null);
+
+    for (const candidate of pageCandidates) {
+      const keep =
+        candidate.minutesRemaining <= 1440 ||
+        candidate.opportunityClass !== "research_candidate" ||
+        shouldRetainForLogicalGraph(candidate);
+
+      if (!keep) continue;
+
+      if (
+        candidate.minutesRemaining > 1440 &&
+        candidate.opportunityClass === "research_candidate"
+      ) {
+        compactLongDatedCandidate(candidate);
+      }
+      retained.push(candidate);
+    }
+  }
+
+  const within24h = retained.filter(candidate => candidate.minutesRemaining <= 1440);
+  if (within24h.length) {
+    await enrichBehaviorSignals(within24h);
+    await enrichExternalEvidence(within24h);
+    await enrichHistoricalEvidence(within24h);
+    await enrichAdvancedIntelligence(within24h);
+  }
+
+  const structuralBeyond24h = retained.filter(candidate =>
+    candidate.minutesRemaining > 1440 &&
+    candidate.opportunityClass !== "research_candidate"
+  );
+  if (structuralBeyond24h.length) {
+    await enrichHistoricalEvidence(structuralBeyond24h);
+  }
+
+  finalizeDiscoveryScores(retained);
+
+  const urgent2h = buildLane("urgent_2h", 120, retained, limitPerLane);
+  const developing6h = buildLane("developing_6h", 360, retained, limitPerLane);
+  const broader24h = buildLane("broader_24h", 1440, retained, limitPerLane);
+
+  const structuralBinary = retained
+    .filter(candidate =>
+      candidate.opportunityClass === "executable_structural" ||
+      candidate.opportunityClass === "top_book_structural_only"
+    )
+    .sort(compareDiscovery)
+    .slice(0, structuralLimit);
+
+  const eventBaskets = await buildEventBasketOpportunities(
+    negRiskMarkets,
+    now,
+    latestEndTs,
+    null,
+    bufferBps
+  );
+
+  const logicalViolations = findStructuralGraphViolations(retained);
+  if (logicalViolations.length) {
+    const byCondition = new Map<string, typeof logicalViolations>();
+    for (const violation of logicalViolations) {
+      for (const conditionId of [
+        violation.easierConditionId,
+        violation.harderConditionId
+      ]) {
+        if (!conditionId) continue;
+        const existing = byCondition.get(conditionId) || [];
+        existing.push(violation);
+        byCondition.set(conditionId, existing);
+      }
+    }
+
+    for (const candidate of retained) {
+      if (!candidate.conditionId) continue;
+      const relations = byCondition.get(candidate.conditionId);
+      if (!relations?.length) continue;
+      candidate.logicalRelations = relations.slice(0, 10);
+      if (!candidate.flags.includes("logical_relative_value_candidate")) {
+        candidate.flags.push("logical_relative_value_candidate");
+      }
+      if (!isPoliticalCandidate(candidate)) {
+        candidate.opportunityPacketScore = round(
+          Math.min(
+            100,
+            (candidate.opportunityPacketScore ?? candidate.discoveryScore ?? candidate.opportunityScore) +
+            Math.min(12, relations[0].violationProbabilityPoints * 0.4)
+          ),
+          1
+        );
+      }
+    }
+  }
+
+  const scanDurationMs = Date.now() - started;
+
+  return {
+    generatedAt: new Date(now).toISOString(),
+    totalActiveMarketsScanned,
+    eligibleMarketsScanned,
+    retainedCandidateCount: retained.length,
+    scanDurationMs,
+    bufferBps,
+    lanes: {
+      urgent2h,
+      developing6h,
+      broader24h
+    },
+    structuralUniverse: {
+      binary: structuralBinary,
+      eventBaskets: eventBaskets.slice(0, structuralLimit),
+      categoryCounts: categoryCounts(structuralBinary),
+      executableCount:
+        structuralBinary.filter(candidate => candidate.opportunityClass === "executable_structural").length +
+        eventBaskets.filter(basket => basket.bestNetProfitUsd > 0).length,
+      topBookOnlyCount:
+        structuralBinary.filter(candidate => candidate.opportunityClass === "top_book_structural_only").length +
+        eventBaskets.filter(basket =>
+          basket.bestNetProfitUsd <= 0 &&
+          basket.flags.includes("top_book_complete_set_edge")
+        ).length
+    },
+    logicalViolations
+  };
+}
