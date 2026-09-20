@@ -1711,7 +1711,10 @@ export async function getTradeControlStats() {
       (select count(*)::int from polymarket_brain.wallet_profiles where enabled) as "enabledWalletProfiles",
       (select count(*)::int from polymarket_brain.trade_intents) as "tradeIntents",
       (select count(*)::int from polymarket_brain.trade_intents where status='AWAITING_SIGNATURE') as "awaitingSignature",
-      (select max(created_at) from polymarket_brain.trade_intents) as "lastIntentAt"
+      (select max(created_at) from polymarket_brain.trade_intents) as "lastIntentAt",
+      (select count(*)::int from polymarket_brain.trading_control_requests) as "controlRequests",
+      (select count(*)::int from polymarket_brain.trading_control_requests where status='AWAITING_SIGNATURE') as "controlAwaitingSignature",
+      (select max(created_at) from polymarket_brain.trading_control_requests) as "lastControlRequestAt"
   `);
   return {
     configured: true,
@@ -1721,6 +1724,87 @@ export async function getTradeControlStats() {
     submissionEnabled:
       String(process.env.TRADING_ENABLED || "false").toLowerCase() === "true"
   };
+}
+
+export async function createTradingControlRequest(input: {
+  walletProfileId?: string;
+  action: "CANCEL_ALL" | "CANCEL_ORDER" | "CANCEL_MARKET";
+  orderId?: string | null;
+  marketId?: string | null;
+}) {
+  if (!pool) throw new Error("persistence_not_configured");
+  const walletProfileId = input.walletProfileId || "primary";
+  const profile = await getWalletProfile(walletProfileId);
+  if (!profile?.configured) throw new Error("wallet_profile_not_configured");
+  if (!profile.enabled) throw new Error("wallet_profile_not_enabled");
+
+  const intentCreationEnabled =
+    String(process.env.TRADING_INTENTS_ENABLED || "false").toLowerCase() === "true";
+  if (!intentCreationEnabled) throw new Error("trading_control_requests_disabled");
+
+  const { rows } = await pool.query(
+    `insert into polymarket_brain.trading_control_requests (
+       wallet_profile_id, action, order_id, market_id, status, created_by
+     ) values ($1,$2,$3,$4,'AWAITING_SIGNATURE','chatgpt')
+     returning
+       id,
+       created_at as "createdAt",
+       updated_at as "updatedAt",
+       wallet_profile_id as "walletProfileId",
+       action,
+       order_id as "orderId",
+       market_id as "marketId",
+       status`,
+    [
+      walletProfileId,
+      input.action,
+      input.orderId ?? null,
+      input.marketId ?? null
+    ]
+  );
+
+  const request = rows[0];
+  if (request?.id) {
+    await pool.query(
+      `insert into polymarket_brain.trade_audit_log (
+         trade_intent_id, action, actor, details
+       ) values (null,$1,'chatgpt',$2::jsonb)`,
+      [
+        input.action,
+        JSON.stringify({
+          tradingControlRequestId: request.id,
+          orderId: input.orderId ?? null,
+          marketId: input.marketId ?? null,
+          signingRequired: true
+        })
+      ]
+    );
+  }
+  return request;
+}
+
+export async function listTradingControlRequests(limit = 50) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(500, limit));
+  const { rows } = await pool.query(
+    `select
+       id,
+       created_at as "createdAt",
+       updated_at as "updatedAt",
+       wallet_profile_id as "walletProfileId",
+       action,
+       order_id as "orderId",
+       market_id as "marketId",
+       status,
+       signing_payload as "signingPayload",
+       submission_response as "submissionResponse",
+       failure_reason as "failureReason"
+     from polymarket_brain.trading_control_requests
+     order by created_at desc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
 }
 
 export async function getPersistentStats() {
