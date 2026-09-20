@@ -1,6 +1,6 @@
-release=2026-09-20T01:30Z
-verified_head=9acb273c22060951797f502b1643d73834cece1d
+release=2026-09-20T01:33Z
+verified_head=d300caf99d066ad2d7af76a98f89776f21ca25c4
 tests=37
 typecheck=passed
 build=passed
-features=wallet-intelligence,side-aware-smart-money,maker-edge,cross-venue,resolution-intelligence,behavior-backtest,digital-fair-value,structural-graph,price-bucket-calibration,opportunity-packets
+features=wallet-intelligence,side-aware-smart-money,batched-wallet-persistence,maker-edge,cross-venue,resolution-intelligence,behavior-backtest,digital-fair-value,structural-graph,price-bucket-calibration,opportunity-packets
