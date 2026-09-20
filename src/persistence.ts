@@ -1164,6 +1164,145 @@ export async function getOpportunityIntelligenceStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function getBehavioralShockBacktest(options?: {
+  lookbackDays?: number;
+  shockThresholdPct?: number;
+  minSamples?: number;
+}) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const lookbackDays = Math.max(1, Math.min(90, options?.lookbackDays ?? 14));
+  const shockThreshold = Math.max(0.5, Math.min(50, options?.shockThresholdPct ?? 10)) / 100;
+  const minSamples = Math.max(1, Math.min(1000, options?.minSamples ?? 5));
+
+  const { rows } = await pool.query(
+    `with token_map as (
+       select distinct on (tok.token_id)
+         tok.token_id,
+         c.condition_id,
+         c.question,
+         coalesce(c.payload->>'primaryCategory','other') as primary_category
+       from polymarket_brain.candidates c
+       cross join lateral jsonb_array_elements_text(
+         coalesce(c.payload->'tokenIds','[]'::jsonb)
+       ) tok(token_id)
+       where c.generated_at >= now() - ($1 || ' days')::interval
+       order by tok.token_id, c.generated_at desc
+     ),
+     series as (
+       select
+         b.token_id,
+         b.minute,
+         b.close_mid::float8 as close_mid,
+         tm.condition_id,
+         tm.question,
+         tm.primary_category,
+         lag(b.close_mid::float8, 5) over (
+           partition by b.token_id order by b.minute
+         ) as close_5m_ago
+       from polymarket_brain.quote_bars_1m b
+       join token_map tm on tm.token_id = b.token_id
+       where b.minute >= now() - ($1 || ' days')::interval
+         and b.close_mid is not null
+     ),
+     shocks as (
+       select
+         *,
+         (close_mid / nullif(close_5m_ago,0) - 1.0) as shock_return
+       from series
+       where close_5m_ago is not null
+         and close_mid > 0
+         and close_5m_ago > 0
+         and abs(close_mid / nullif(close_5m_ago,0) - 1.0) >= $2
+     ),
+     forward as (
+       select
+         s.*,
+         f15.close_mid as close_15m,
+         f30.close_mid as close_30m,
+         f60.close_mid as close_60m
+       from shocks s
+       left join lateral (
+         select b.close_mid::float8 as close_mid
+         from polymarket_brain.quote_bars_1m b
+         where b.token_id = s.token_id
+           and b.minute >= s.minute + interval '15 minutes'
+           and b.minute <= s.minute + interval '18 minutes'
+           and b.close_mid is not null
+         order by b.minute asc
+         limit 1
+       ) f15 on true
+       left join lateral (
+         select b.close_mid::float8 as close_mid
+         from polymarket_brain.quote_bars_1m b
+         where b.token_id = s.token_id
+           and b.minute >= s.minute + interval '30 minutes'
+           and b.minute <= s.minute + interval '33 minutes'
+           and b.close_mid is not null
+         order by b.minute asc
+         limit 1
+       ) f30 on true
+       left join lateral (
+         select b.close_mid::float8 as close_mid
+         from polymarket_brain.quote_bars_1m b
+         where b.token_id = s.token_id
+           and b.minute >= s.minute + interval '60 minutes'
+           and b.minute <= s.minute + interval '63 minutes'
+           and b.close_mid is not null
+         order by b.minute asc
+         limit 1
+       ) f60 on true
+     ),
+     expanded as (
+       select
+         primary_category,
+         shock_return,
+         horizon,
+         future_close,
+         (future_close / nullif(close_mid,0) - 1.0) as forward_return
+       from forward
+       cross join lateral (
+         values
+           ('15m'::text, close_15m),
+           ('30m'::text, close_30m),
+           ('60m'::text, close_60m)
+       ) h(horizon, future_close)
+       where future_close is not null
+     )
+     select
+       primary_category as "primaryCategory",
+       horizon,
+       count(*)::int as samples,
+       round(avg(abs(shock_return))::numeric,6)::float8 as "avgShockAbsReturn",
+       round(avg(forward_return)::numeric,6)::float8 as "avgForwardReturn",
+       round(avg(abs(forward_return))::numeric,6)::float8 as "avgForwardAbsReturn",
+       round(avg(
+         case when sign(shock_return) = sign(forward_return) and forward_return <> 0
+              then 1.0 else 0.0 end
+       )::numeric,4)::float8 as "continuationRate",
+       round(avg(
+         case when sign(shock_return) <> sign(forward_return) and forward_return <> 0
+              then 1.0 else 0.0 end
+       )::numeric,4)::float8 as "reversionRate"
+     from expanded
+     group by primary_category, horizon
+     having count(*) >= $3
+     order by primary_category, horizon`,
+    [lookbackDays, shockThreshold, minSamples]
+  );
+
+  const total = rows.reduce((sum, row) => sum + Number(row.samples || 0), 0);
+  return {
+    configured: true,
+    generatedAt: new Date().toISOString(),
+    lookbackDays,
+    shockThresholdPct: shockThreshold * 100,
+    minSamples,
+    aggregatedSampleRows: total,
+    categories: rows
+  };
+}
+
 export async function getPersistentStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
