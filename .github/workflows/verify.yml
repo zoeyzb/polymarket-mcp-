@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -25,8 +25,33 @@ jobs:
           cache: "npm"
       - run: npm ci
       - name: Typecheck
-        run: npm run typecheck
+        id: typecheck
+        shell: bash
+        run: |
+          set +e
+          npm run typecheck > typecheck.log 2>&1
+          code=$?
+          cat typecheck.log
+          if [ "$code" -ne 0 ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+      - name: Publish typecheck diagnostics
+        if: steps.typecheck.outputs.failed == 'true'
+        shell: bash
+        run: |
+          cp typecheck.log TYPECHECK_LOG.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add TYPECHECK_LOG.txt
+          git commit -m "ci: capture typecheck diagnostics"
+          git push origin HEAD:main
+          exit 1
       - name: Tests
+        if: steps.typecheck.outputs.failed != 'true'
         run: npm test -- --run
       - name: Build
+        if: steps.typecheck.outputs.failed != 'true'
         run: npm run build
