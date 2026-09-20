@@ -1,5 +1,0 @@
-
-> zoey-polymarket-mcp@0.4.0 typecheck
-> tsc -p tsconfig.json --noEmit
-
-src/scanner.ts(1124,1): error TS1005: '}' expected.
