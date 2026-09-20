@@ -2,36 +2,4 @@
 > zoey-polymarket-mcp@0.4.0 typecheck
 > tsc -p tsconfig.json --noEmit
 
-src/scanner.ts(1291,2): error TS1128: Declaration or statement expected.
-src/scanner.ts(1291,3): error TS1128: Declaration or statement expected.
-src/scanner.ts(1292,9): error TS1005: ':' expected.
-src/scanner.ts(1292,29): error TS1005: ',' expected.
-src/scanner.ts(1293,9): error TS1005: ':' expected.
-src/scanner.ts(1293,22): error TS1005: ',' expected.
-src/scanner.ts(1294,9): error TS1005: ':' expected.
-src/scanner.ts(1294,63): error TS1005: ',' expected.
-src/scanner.ts(1295,9): error TS1005: ':' expected.
-src/scanner.ts(1295,80): error TS1005: ',' expected.
-src/scanner.ts(1296,9): error TS1005: ':' expected.
-src/scanner.ts(1296,86): error TS1005: ',' expected.
-src/scanner.ts(1297,9): error TS1005: ':' expected.
-src/scanner.ts(1297,74): error TS1005: ',' expected.
-src/scanner.ts(1299,9): error TS1005: ':' expected.
-src/scanner.ts(1305,6): error TS1005: ',' expected.
-src/scanner.ts(1307,9): error TS1005: ':' expected.
-src/scanner.ts(1307,20): error TS1005: ',' expected.
-src/scanner.ts(1307,35): error TS1005: ',' expected.
-src/scanner.ts(1307,36): error TS1109: Expression expected.
-src/scanner.ts(1307,38): error TS1005: ':' expected.
-src/scanner.ts(1307,42): error TS1005: ',' expected.
-src/scanner.ts(1308,9): error TS1005: ':' expected.
-src/scanner.ts(1311,4): error TS1005: ',' expected.
-src/scanner.ts(1313,12): error TS1005: ',' expected.
-src/scanner.ts(1313,17): error TS1005: ',' expected.
-src/scanner.ts(1313,21): error TS1005: ',' expected.
-src/scanner.ts(1313,26): error TS1005: ',' expected.
-src/scanner.ts(1313,33): error TS1005: ',' expected.
-src/scanner.ts(1313,37): error TS1005: ',' expected.
-src/scanner.ts(1313,55): error TS1005: ',' expected.
-src/scanner.ts(1313,57): error TS1136: Property assignment expected.
-src/scanner.ts(1450,1): error TS1128: Declaration or statement expected.
+src/scanner.ts(1124,1): error TS1005: '}' expected.
