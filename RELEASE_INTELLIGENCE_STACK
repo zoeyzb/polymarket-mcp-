@@ -1,8 +1,8 @@
-release=2026-09-20T03:52Z
-verified_head=1b0f5693f6e12dedb901f7165b8920c7dd0ff2b2
+release=2026-09-20T04:01Z
+verified_head=4075508780b815c3d8ccf7af151a48ef7e82ed44
 typecheck=passed
 tests=passed
 build=passed
-features=streamed-gamma-pages,streamed-clob-enrichment,compact-retention,neg-risk-local-books,5m-markets,5m-charts,wallet-control-plane
+features=streamed-gamma-pages,selective-clob-depth,compact-retention,neg-risk-local-books,5m-markets,5m-charts,wallet-control-plane,cancel-all,cancel-order,cancel-market
 trading_enabled=false
 trade_intents_enabled=false
