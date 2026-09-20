@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseNumberArray, parseStringArray } from "./polymarket.js";
-import { calculateCompleteSetExecution } from "./scanner.js";
+import { calculateCompleteSetExecution, getEndDate, getMarketWindowMinutes } from "./scanner.js";
 import {
   analyzePriceHistoryPayload,
   analyzeTradeFlowPayload,
@@ -27,6 +27,22 @@ function book(tokenId: string, asks: Array<[number, number]>): NormalizedBook {
     }
   };
 }
+
+describe("short-window market timing", () => {
+  it("prefers precise endDate over date-only endDateIso", () => {
+    expect(getEndDate({
+      endDate: "2026-09-20T20:30:00Z",
+      endDateIso: "2026-09-20"
+    })).toBe("2026-09-20T20:30:00.000Z");
+  });
+
+  it("detects a true five-minute event window", () => {
+    expect(getMarketWindowMinutes({
+      endDate: "2026-09-20T20:30:00Z",
+      events: [{ startTime: "2026-09-20T20:25:00Z" }]
+    })).toBe(5);
+  });
+});
 
 describe("Gamma parsing", () => {
   it("parses JSON encoded string arrays", () => {
