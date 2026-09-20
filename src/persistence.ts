@@ -4,6 +4,7 @@ import type { RealtimeQuote } from "./realtime.js";
 import type { SportsFeedEvent } from "./sports.js";
 import type { HistoricalCalibrationSample } from "./historical-calibration.js";
 import { isPoliticalCandidate } from "./domain-policy.js";
+import type { WalletIntelligenceProfile } from "./wallet-intelligence.js";
 
 const { Pool } = pg;
 
@@ -792,6 +793,219 @@ export async function getWorkerHeartbeats() {
     ...row,
     updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : null
   }));
+}
+
+export async function persistWalletIntelligenceProfiles(
+  profiles: WalletIntelligenceProfile[]
+) {
+  if (!pool) return { configured: false, reason: "not_configured", profiles: 0, trades: 0 };
+  let profileRows = 0;
+  let tradeRows = 0;
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    for (const profile of profiles) {
+      const allTime = {
+        allTimeEconomicPnl: profile.allTimeEconomicPnl,
+        realizedMarketPnl: profile.realizedMarketPnl,
+        sampledWinRate: profile.sampledWinRate,
+        sampledProfitFactor: profile.sampledProfitFactor,
+        scoreBreakdown: profile.scoreBreakdown,
+        flags: profile.flags
+      };
+
+      const result = await client.query(
+        `insert into polymarket_brain.wallet_intelligence (
+           wallet_address, user_name, leaderboard_rank, leaderboard_pnl,
+           leaderboard_volume, all_time_pnl, realized_market_pnl,
+           maker_rebate, taker_rebate, reward_income, volume_usdc,
+           trade_count, distinct_markets, biggest_win, smart_score,
+           category_stats, stats, updated_at
+         ) values (
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+           $16::jsonb,$17::jsonb,now()
+         )
+         on conflict (wallet_address) do update set
+           user_name = excluded.user_name,
+           leaderboard_rank = excluded.leaderboard_rank,
+           leaderboard_pnl = excluded.leaderboard_pnl,
+           leaderboard_volume = excluded.leaderboard_volume,
+           all_time_pnl = excluded.all_time_pnl,
+           realized_market_pnl = excluded.realized_market_pnl,
+           maker_rebate = excluded.maker_rebate,
+           taker_rebate = excluded.taker_rebate,
+           reward_income = excluded.reward_income,
+           volume_usdc = excluded.volume_usdc,
+           trade_count = excluded.trade_count,
+           distinct_markets = excluded.distinct_markets,
+           biggest_win = excluded.biggest_win,
+           smart_score = excluded.smart_score,
+           category_stats = excluded.category_stats,
+           stats = excluded.stats,
+           updated_at = now()`,
+        [
+          profile.walletAddress,
+          profile.userName,
+          profile.leaderboardRank,
+          profile.leaderboardPnl,
+          profile.leaderboardVolume,
+          profile.allTimeEconomicPnl,
+          profile.realizedMarketPnl,
+          profile.makerRebate,
+          profile.takerRebate,
+          profile.rewardIncome,
+          profile.volumeUsdc,
+          profile.tradeCount,
+          profile.distinctMarkets,
+          profile.biggestWin,
+          profile.smartScore,
+          JSON.stringify(profile.categoryStats),
+          JSON.stringify(allTime)
+        ]
+      );
+      profileRows += result.rowCount ?? 0;
+
+      for (const trade of profile.recentTrades) {
+        const tx = String(trade.transaction_hash || "");
+        if (!tx) continue;
+        const timestamp = Number(trade.timestamp);
+        const observedAt = Number.isFinite(timestamp)
+          ? new Date(timestamp * 1000).toISOString()
+          : new Date().toISOString();
+        const size = Number(trade.size);
+        const price = Number(trade.price);
+        const title = String(trade.title || "");
+        const slug = String(trade.slug || "");
+        const category = profile.categoryStats.find(stat =>
+          title.toLowerCase().includes(stat.category.replace("_", " "))
+        )?.category ?? profile.dominantCategory ?? "other";
+
+        const inserted = await client.query(
+          `insert into polymarket_brain.wallet_trade_signals (
+             transaction_hash, observed_at, wallet_address, condition_id,
+             token_id, side, outcome, title, slug, price, size,
+             notional_usdc, wallet_score, primary_category, payload
+           ) values (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb
+           )
+           on conflict (transaction_hash) do nothing`,
+          [
+            tx,
+            observedAt,
+            profile.walletAddress,
+            trade.condition_id ? String(trade.condition_id) : null,
+            trade.token_id ? String(trade.token_id) : null,
+            trade.side ? String(trade.side) : null,
+            trade.outcome ? String(trade.outcome) : null,
+            title || null,
+            slug || null,
+            Number.isFinite(price) ? price : null,
+            Number.isFinite(size) ? size : null,
+            Number.isFinite(size) && Number.isFinite(price) ? size * price : null,
+            profile.smartScore,
+            category,
+            JSON.stringify(trade)
+          ]
+        );
+        tradeRows += inserted.rowCount ?? 0;
+      }
+    }
+
+    await client.query("commit");
+    return { configured: true, profiles: profileRows, trades: tradeRows };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getTopWalletIntelligence(limit = 50) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(500, limit));
+  const { rows } = await pool.query(
+    `select
+       wallet_address as "walletAddress",
+       user_name as "userName",
+       leaderboard_rank as "leaderboardRank",
+       leaderboard_pnl::float8 as "leaderboardPnl",
+       leaderboard_volume::float8 as "leaderboardVolume",
+       all_time_pnl::float8 as "allTimePnl",
+       realized_market_pnl::float8 as "realizedMarketPnl",
+       maker_rebate::float8 as "makerRebate",
+       taker_rebate::float8 as "takerRebate",
+       reward_income::float8 as "rewardIncome",
+       volume_usdc::float8 as "volumeUsdc",
+       trade_count::bigint as "tradeCount",
+       distinct_markets as "distinctMarkets",
+       biggest_win::float8 as "biggestWin",
+       smart_score::float8 as "smartScore",
+       category_stats as "categoryStats",
+       stats,
+       updated_at as "updatedAt"
+     from polymarket_brain.wallet_intelligence
+     order by smart_score desc, leaderboard_pnl desc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}
+
+export async function getConditionSmartMoneySignals(
+  conditionIds: string[],
+  lookbackMinutes = 60
+) {
+  if (!pool || conditionIds.length === 0) return {};
+  const unique = [...new Set(conditionIds.filter(Boolean))].slice(0, 500);
+  const bounded = Math.max(5, Math.min(1440, lookbackMinutes));
+
+  const { rows } = await pool.query(
+    `select
+       s.condition_id as "conditionId",
+       s.wallet_address as "walletAddress",
+       s.side,
+       s.outcome,
+       s.price::float8 as price,
+       s.size::float8 as size,
+       s.notional_usdc::float8 as "notionalUsd",
+       s.wallet_score::float8 as "walletScore",
+       s.primary_category as "primaryCategory",
+       s.observed_at as "observedAt",
+       w.user_name as "userName",
+       w.category_stats as "categoryStats"
+     from polymarket_brain.wallet_trade_signals s
+     left join polymarket_brain.wallet_intelligence w
+       on w.wallet_address = s.wallet_address
+     where s.condition_id = any($1::text[])
+       and s.observed_at >= now() - ($2 || ' minutes')::interval
+     order by s.condition_id, s.observed_at desc`,
+    [unique, bounded]
+  );
+
+  const grouped: Record<string, unknown[]> = {};
+  for (const row of rows) {
+    const key = String(row.conditionId || "");
+    if (!key) continue;
+    (grouped[key] ||= []).push(row);
+  }
+  return grouped;
+}
+
+export async function getWalletIntelligenceStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      count(*)::int as "wallets",
+      count(*) filter (where smart_score >= 70)::int as "highScoreWallets",
+      max(updated_at) as "lastProfileRefresh",
+      (select count(*)::int from polymarket_brain.wallet_trade_signals) as "tradeSignals",
+      (select max(observed_at) from polymarket_brain.wallet_trade_signals) as "lastTradeSignalAt"
+    from polymarket_brain.wallet_intelligence
+  `);
+  return { configured: true, ...rows[0] };
 }
 
 export async function getPersistentStats() {
