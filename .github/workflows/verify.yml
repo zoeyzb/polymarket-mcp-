@@ -24,4 +24,9 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm ci
-      - run: npm run verify
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests
+        run: npm test -- --run
+      - name: Build
+        run: npm run build
