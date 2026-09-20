@@ -723,6 +723,65 @@ export async function upsertHistoricalCalibrationSample(sample: HistoricalCalibr
   return { configured: true, upserted: result.rowCount ?? 0 };
 }
 
+export async function getPriceBucketCalibration(options?: {
+  bucketSize?: number;
+  minSamples?: number;
+}) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const bucketSize = Math.max(0.01, Math.min(0.25, options?.bucketSize ?? 0.05));
+  const minSamples = Math.max(1, Math.min(1000, options?.minSamples ?? 5));
+
+  const { rows } = await pool.query(
+    `with expanded as (
+       select
+         h.domain,
+         kv.key as horizon,
+         (pv.value #>> '{}')::float8 as probability,
+         h.actual_outcome0::float8 as outcome
+       from polymarket_brain.historical_calibration h
+       cross join lateral jsonb_each(h.prices) pv
+       cross join lateral jsonb_each(h.brier) kv
+       where kv.key = pv.key
+         and (pv.value #>> '{}')::float8 between 0 and 1
+     ),
+     bucketed as (
+       select
+         domain,
+         horizon,
+         least(1.0, floor(probability / $1) * $1) as bucket_low,
+         probability,
+         outcome
+       from expanded
+     )
+     select
+       domain,
+       horizon,
+       round(bucket_low::numeric,4)::float8 as "bucketLow",
+       round(least(1.0,bucket_low + $1)::numeric,4)::float8 as "bucketHigh",
+       count(*)::int as samples,
+       round(avg(probability)::numeric,6)::float8 as "avgImpliedProbability",
+       round(avg(outcome)::numeric,6)::float8 as "observedWinRate",
+       round((avg(outcome)-avg(probability))::numeric,6)::float8 as "calibrationGap",
+       round(avg(power(outcome-probability,2))::numeric,6)::float8 as "meanBrier"
+     from bucketed
+     group by domain, horizon, bucket_low
+     having count(*) >= $2
+     order by domain, horizon, bucket_low`,
+    [bucketSize, minSamples]
+  );
+
+  return {
+    configured: true,
+    generatedAt: new Date().toISOString(),
+    bucketSize,
+    minSamples,
+    buckets: rows,
+    note:
+      "Empirical Polymarket calibration from this system's resolved non-political samples. Positive calibrationGap means outcomes occurred more often than implied in that bucket; negative means less often. Small samples should not be treated as stable edge."
+  };
+}
+
 export async function getHistoricalCalibrationSummary() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
