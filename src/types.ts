@@ -147,7 +147,7 @@ export interface ScanCandidate {
   logicalRelations?: import("./structural-graph.js").StructuralGraphViolation[];
   smartMoney?: {
     signals: Array<Record<string, unknown>>;
-    independentWallets: number;
+    uniqueWallets: number;
     highScoreWallets: number;
     totalNotionalUsd: number;
     weightedSmartMoneyScore: number;
