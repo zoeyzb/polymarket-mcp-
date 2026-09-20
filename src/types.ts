@@ -141,6 +141,18 @@ export interface ScanCandidate {
     lastSeen: string | null;
     persistenceBoost: number;
   };
+  makerEdge?: import("./maker-edge.js").MakerEdgeEstimate | null;
+  resolutionIntelligence?: import("./resolution-intelligence.js").ResolutionIntelligence | null;
+  crossVenue?: import("./cross-venue.js").CrossVenueMatch[];
+  smartMoney?: {
+    signals: Array<Record<string, unknown>>;
+    independentWallets: number;
+    highScoreWallets: number;
+    totalNotionalUsd: number;
+    weightedSmartMoneyScore: number;
+    flags: string[];
+  } | null;
+  opportunityPacketScore?: number;
   rapidReviewScore: number;
   scoreBreakdown: Record<string, number>;
   flags: string[];
