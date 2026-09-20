@@ -195,6 +195,6 @@ export function estimateMakerEdge(
     },
     flags,
     note:
-      "Indicative maker economics only. Actual maker rebate/reward payout depends on your executed maker share, competing maker fee-equivalent, inventory path, and adverse selection."
+      "Indicative maker economics only; rebate/reward profit is not guaranteed. Actual payout depends on your executed maker share, competing maker fee-equivalent, inventory path, and adverse selection."
   };
 }
