@@ -159,11 +159,19 @@ export function scoreWalletProfile(input: {
     Math.tanh(leaderboardPnl / 250_000) * 15
   );
 
-  const distinctMarkets = Math.max(0, Math.floor(n(stats?.trades)));
-  const tradeCount = Math.max(0, Math.floor(n(allTime.trade_count)));
+  const distinctMarkets = new Set(
+    closedPositions
+      .map(position => String(position.condition_id || ""))
+      .filter(Boolean)
+  ).size;
+  const tradeCount = Math.max(
+    0,
+    Math.floor(n(allTime.trade_count) || n(stats?.trades))
+  );
   const sampleConfidence = clamp(
-    Math.log10(Math.max(1, distinctMarkets + 1)) * 22 +
-    Math.log10(Math.max(1, closedPositions.length + 1)) * 16
+    Math.log10(Math.max(1, distinctMarkets + 1)) * 24 +
+    Math.log10(Math.max(1, tradeCount + 1)) * 10 +
+    Math.log10(Math.max(1, closedPositions.length + 1)) * 10
   );
 
   const consistency = clamp(
