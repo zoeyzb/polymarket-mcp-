@@ -29,6 +29,8 @@ import {
   getCalibrationStats,
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
+  getLatestMultiHorizonSnapshot,
+  getMultiHorizonSnapshotStats,
   getOpportunityIntelligenceStats,
   getPriceBucketCalibration,
   getQuoteBars,
@@ -56,6 +58,7 @@ import {
   listTradingControlRequests,
   persistAlertsFromScan,
   persistOpportunityPackets,
+  persistMultiHorizonSnapshot,
   persistRealtimeQuotes,
   persistScan,
   persistSportsEvents,
@@ -379,15 +382,27 @@ export function createMcpServer() {
   server.registerTool(
     "markets.scan_multi_horizon",
     {
-      description: "Scan the active Polymarket universe once, then return three simultaneous research horizons (<=2h, <=6h, <=24h) plus full-universe binary/NegRisk structural opportunities regardless of expiry.",
+      description: "Return the latest persisted exhaustive multi-horizon scan produced by the dedicated scanner worker. This is intentionally served from Neon so the API stays responsive instead of rescanning the full universe synchronously.",
       inputSchema: {
-        minLiquidity: z.number().min(0).default(0),
-        limitPerLane: z.number().int().min(1).max(500).default(100),
-        structuralLimit: z.number().int().min(1).max(500).default(200),
-        bufferBps: z.number().int().min(0).max(1000).default(50)
+        maxAgeSeconds: z.number().int().min(1).max(3600).default(300)
       }
     },
-    async input => textResult(await scanMultiHorizon(input))
+    async input => {
+      const latest = await getLatestMultiHorizonSnapshot();
+      if (!latest) {
+        return textResult({
+          ok: false,
+          reason: "no_scanner_snapshot_yet",
+          stats: await getMultiHorizonSnapshotStats()
+        });
+      }
+      return textResult({
+        ok: true,
+        stale: Number(latest.ageSeconds || 0) > input.maxAgeSeconds,
+        maxAgeSeconds: input.maxAgeSeconds,
+        snapshot: latest
+      });
+    }
   );
 
   server.registerTool(
@@ -1216,7 +1231,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) })),
       realtimeTargets: await getRealtimeTargetStats().catch(error => ({ error: errorMessage(error) })),
       maintenance: await getMaintenanceStats().catch(error => ({ error: errorMessage(error) })),
-      trading: await getTradeControlStats().catch(error => ({ error: errorMessage(error) }))
+      trading: await getTradeControlStats().catch(error => ({ error: errorMessage(error) })),
+      multiHorizon: await getMultiHorizonSnapshotStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
   }
@@ -1320,12 +1336,20 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   }
 
   if (url.pathname === "/api/multi-horizon") {
-    json(res, 200, await scanMultiHorizon({
-      minLiquidity: Math.max(0, Number(url.searchParams.get("minLiquidity") || 0)),
-      limitPerLane: numberParam(url, "limitPerLane", 100, 1, 500),
-      structuralLimit: numberParam(url, "structuralLimit", 200, 1, 500),
-      bufferBps: numberParam(url, "bufferBps", 50, 0, 1000)
-    }));
+    const latest = await getLatestMultiHorizonSnapshot();
+    if (!latest) {
+      json(res, 503, {
+        error: "no_scanner_snapshot_yet",
+        stats: await getMultiHorizonSnapshotStats().catch(() => null)
+      });
+      return true;
+    }
+    const maxAgeSeconds = numberParam(url, "maxAgeSeconds", 300, 1, 3600);
+    json(res, 200, {
+      stale: Number(latest.ageSeconds || 0) > maxAgeSeconds,
+      maxAgeSeconds,
+      ...latest
+    });
     return true;
   }
 
@@ -1532,6 +1556,15 @@ async function runBackgroundScan() {
       candidates: multi.lanes.broader24h.candidates,
       eventBaskets: []
     };
+
+    await persistMultiHorizonSnapshot(multi).catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "multi_horizon_snapshot_persistence_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      }));
+    });
 
     await persistScan(broadScan).catch(error => {
       console.error(JSON.stringify({
