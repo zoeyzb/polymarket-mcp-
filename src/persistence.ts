@@ -1807,6 +1807,88 @@ export async function listTradingControlRequests(limit = 50) {
   return rows;
 }
 
+export async function persistMultiHorizonSnapshot(
+  result: import("./types.js").MultiHorizonScanResult
+) {
+  if (!pool) return { configured: false, reason: "not_configured" };
+
+  const generatedAt = result.generatedAt || new Date().toISOString();
+  const { rowCount } = await pool.query(
+    `insert into polymarket_brain.multi_horizon_snapshots (
+       generated_at, total_active_markets, eligible_markets,
+       retained_candidates, scan_duration_ms, payload
+     ) values ($1,$2,$3,$4,$5,$6::jsonb)
+     on conflict (generated_at) do update set
+       total_active_markets = excluded.total_active_markets,
+       eligible_markets = excluded.eligible_markets,
+       retained_candidates = excluded.retained_candidates,
+       scan_duration_ms = excluded.scan_duration_ms,
+       payload = excluded.payload,
+       recorded_at = now()`,
+    [
+      generatedAt,
+      result.totalActiveMarketsScanned ?? null,
+      result.eligibleMarketsScanned ?? null,
+      result.retainedCandidateCount ?? null,
+      result.scanDurationMs ?? null,
+      JSON.stringify(result)
+    ]
+  );
+
+  await pool.query(
+    `delete from polymarket_brain.multi_horizon_snapshots
+     where generated_at < (
+       select generated_at
+       from polymarket_brain.multi_horizon_snapshots
+       order by generated_at desc
+       offset 99 limit 1
+     )`
+  ).catch(() => {});
+
+  return { configured: true, written: rowCount ?? 0, generatedAt };
+}
+
+export async function getLatestMultiHorizonSnapshot() {
+  if (!pool) return null;
+  const { rows } = await pool.query(
+    `select
+       generated_at as "generatedAt",
+       recorded_at as "recordedAt",
+       total_active_markets as "totalActiveMarketsScanned",
+       eligible_markets as "eligibleMarketsScanned",
+       retained_candidates as "retainedCandidateCount",
+       scan_duration_ms as "scanDurationMs",
+       payload
+     from polymarket_brain.multi_horizon_snapshots
+     order by generated_at desc
+     limit 1`
+  );
+  if (!rows[0]) return null;
+
+  const generatedAt = new Date(rows[0].generatedAt).toISOString();
+  const recordedAt = new Date(rows[0].recordedAt).toISOString();
+  return {
+    ...rows[0].payload,
+    generatedAt,
+    recordedAt,
+    ageSeconds: Math.max(0, Math.round((Date.now() - Date.parse(generatedAt)) / 1000)),
+    persisted: true
+  };
+}
+
+export async function getMultiHorizonSnapshotStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(
+    `select
+       count(*)::int as "snapshotCount",
+       max(generated_at) as "latestGeneratedAt",
+       max(recorded_at) as "latestRecordedAt",
+       max(total_active_markets)::int as "maxActiveMarketsSeen"
+     from polymarket_brain.multi_horizon_snapshots`
+  );
+  return { configured: true, ...rows[0] };
+}
+
 export async function getPersistentStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
