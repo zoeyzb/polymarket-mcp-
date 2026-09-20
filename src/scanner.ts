@@ -4,6 +4,7 @@ import {
   getPriceHistory,
   getRecentTrades,
   iterateActiveMarketPages,
+  listActiveMarketsEndingBetween,
   listAllActiveMarkets,
   parseNumberArray,
   parseStringArray
@@ -929,14 +930,16 @@ export async function scanClosingSoon(options?: {
   const now = started;
   const cutoff = now + maxMinutes * 60000;
 
-  const all = await listAllActiveMarkets();
+  const all = await listActiveMarketsEndingBetween(
+    new Date(now),
+    new Date(cutoff)
+  );
   const inWindow = all
-    .filter(m => {
-      const endDate = getEndDate(m);
-      if (!endDate) return false;
-      const ts = Date.parse(endDate);
-      return ts >= now && ts <= cutoff && m.active !== false && m.closed !== true && m.acceptingOrders !== false;
-    })
+    .filter(m =>
+      m.active !== false &&
+      m.closed !== true &&
+      m.acceptingOrders !== false
+    )
     .filter(m => n(m.liquidityNum ?? m.liquidity) >= minLiquidity);
 
   const tokenIds = includeOrderBooks
