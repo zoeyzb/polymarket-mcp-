@@ -13,10 +13,13 @@ import {
   calculateCompleteOutcomeBasket
 } from "./intelligence.js";
 import { recordSnapshot } from "./snapshots.js";
-import { getHistoricalCandidateStats } from "./persistence.js";
+import { getConditionSmartMoneySignals, getHistoricalCandidateStats } from "./persistence.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { isPoliticalCandidate, isPoliticalMarket } from "./domain-policy.js";
 import { classifyMarketCategories, primaryMarketCategory } from "./category-taxonomy.js";
+import { estimateMakerEdge } from "./maker-edge.js";
+import { analyzeResolutionRules } from "./resolution-intelligence.js";
+import { listOpenKalshiMarkets, matchCandidateToKalshi } from "./cross-venue.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -472,7 +475,7 @@ async function enrichMarket(
   const categories = classifyMarketCategories(market, now);
   const primaryCategory = primaryMarketCategory(categories);
 
-  return {
+  const candidate: ScanCandidate = {
     id: market.id ? String(market.id) : null,
     slug: market.slug ? String(market.slug) : null,
     question: String(market.question || "Untitled market"),
@@ -502,6 +505,20 @@ async function enrichMarket(
       ...(isPoliticalMarket(market) ? ["political_structural_only"] : [])
     ]
   };
+
+  candidate.makerEdge = estimateMakerEdge(
+    market,
+    primaryCategory,
+    books[0] ?? null,
+    0,
+    0
+  );
+  candidate.resolutionIntelligence = analyzeResolutionRules(candidate);
+  for (const flag of candidate.resolutionIntelligence.flags) {
+    if (!candidate.flags.includes(flag)) candidate.flags.push(flag);
+  }
+
+  return candidate;
 }
 
 async function enrichBehaviorSignals(candidates: ScanCandidate[]) {
@@ -594,6 +611,117 @@ async function enrichExternalEvidence(candidates: ScanCandidate[]) {
   await Promise.all(Array.from({ length: Math.min(concurrency, queue.length || 1) }, worker));
 }
 
+async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
+  const conditionIds = candidates
+    .map(candidate => candidate.conditionId)
+    .filter((id): id is string => Boolean(id));
+
+  const [smartMoneyByCondition, kalshiMarkets] = await Promise.all([
+    conditionIds.length
+      ? getConditionSmartMoneySignals(conditionIds, 90).catch(() => ({} as Record<string, unknown[]>))
+      : Promise.resolve({} as Record<string, unknown[]>),
+    listOpenKalshiMarkets().catch(() => [])
+  ]);
+
+  for (const candidate of candidates) {
+    // Re-estimate maker adverse-selection risk after behavior enrichment.
+    const firstBook = candidate.books?.[0];
+    if (firstBook) {
+      candidate.makerEdge = estimateMakerEdge(
+        {
+          question: candidate.question,
+          slug: candidate.slug ?? undefined,
+          description: candidate.resolutionRules ?? undefined,
+          resolutionSource: candidate.resolutionSource ?? undefined
+        },
+        candidate.primaryCategory,
+        {
+          tokenId: firstBook.tokenId,
+          bestBid: firstBook.bestBid,
+          bestAsk: firstBook.bestAsk,
+          spread: firstBook.spread,
+          midpoint: firstBook.midpoint,
+          bidDepthUsdTop5: firstBook.bidDepthUsdTop5,
+          askDepthUsdTop5: firstBook.askDepthUsdTop5,
+          raw: { asset_id: firstBook.tokenId, bids: [], asks: [] }
+        },
+        candidate.marketSignals?.priceRegime?.anomalyScore ?? 0,
+        candidate.marketSignals?.tradeFlow?.signedImbalance ?? 0
+      );
+    }
+
+    candidate.resolutionIntelligence = analyzeResolutionRules(candidate);
+
+    // Cross-venue data is descriptive on political markets and cannot boost discovery.
+    candidate.crossVenue = matchCandidateToKalshi(candidate, kalshiMarkets, 3);
+
+    if (!candidate.conditionId || isPoliticalCandidate(candidate)) {
+      candidate.smartMoney = null;
+      continue;
+    }
+
+    const signals = (smartMoneyByCondition[candidate.conditionId] || []) as Array<Record<string, unknown>>;
+    const uniqueWallets = new Set<string>();
+    const highScoreWallets = new Set<string>();
+    let totalNotionalUsd = 0;
+    let weightedNumerator = 0;
+    let weightedDenominator = 0;
+
+    for (const signal of signals) {
+      const wallet = String(signal.walletAddress || "");
+      if (wallet) uniqueWallets.add(wallet);
+      const walletScore = n(signal.walletScore);
+      if (walletScore >= 70 && wallet) highScoreWallets.add(wallet);
+
+      const categoryStats = Array.isArray(signal.categoryStats)
+        ? signal.categoryStats as Array<Record<string, unknown>>
+        : [];
+      const categoryRow = categoryStats.find(row =>
+        String(row.category || "") === candidate.primaryCategory
+      );
+      const categoryMatch = categoryRow
+        ? Math.max(0.25, Math.min(1, n(categoryRow.shareOfSample)))
+        : 0.25;
+
+      const notional = Math.max(0, n(signal.notionalUsd));
+      totalNotionalUsd += notional;
+      const weight = Math.max(1, notional) * categoryMatch;
+      weightedNumerator += walletScore * weight;
+      weightedDenominator += weight;
+    }
+
+    const weightedSmartMoneyScore = weightedDenominator > 0
+      ? weightedNumerator / weightedDenominator
+      : 0;
+
+    const flags: string[] = [];
+    if (highScoreWallets.size >= 1) flags.push("high_score_wallet_active");
+    if (highScoreWallets.size >= 2) flags.push("multi_wallet_smart_money_consensus");
+    if (totalNotionalUsd >= 10_000) flags.push("large_smart_money_notional");
+
+    candidate.smartMoney = {
+      signals: signals.slice(0, 25),
+      independentWallets: uniqueWallets.size,
+      highScoreWallets: highScoreWallets.size,
+      totalNotionalUsd: round(totalNotionalUsd, 2),
+      weightedSmartMoneyScore: round(weightedSmartMoneyScore, 1),
+      flags
+    };
+    for (const flag of flags) if (!candidate.flags.includes(flag)) candidate.flags.push(flag);
+
+    if (weightedSmartMoneyScore >= 70 && highScoreWallets.size >= 1) {
+      candidate.attentionScore = round(
+        Math.min(
+          100,
+          (candidate.attentionScore ?? candidate.opportunityScore) +
+          Math.min(8, weightedSmartMoneyScore * 0.06 + Math.log10(Math.max(1, totalNotionalUsd)) * 0.6)
+        ),
+        1
+      );
+    }
+  }
+}
+
 async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
   const conditionIds = candidates
     .map(candidate => candidate.conditionId)
@@ -634,9 +762,28 @@ async function enrichHistoricalEvidence(candidates: ScanCandidate[]) {
 
 function finalizeDiscoveryScores(candidates: ScanCandidate[]) {
   for (const candidate of candidates) {
+    const makerScore = candidate.makerEdge?.makerOpportunityScore ?? 0;
+    const resolutionSafety = 100 - (candidate.resolutionIntelligence?.resolutionRiskScore ?? 50);
+    const bestCrossVenue = candidate.crossVenue?.[0];
+    const crossVenueScore = bestCrossVenue
+      ? bestCrossVenue.classification === "cross_venue_arb_candidate"
+        ? 100
+        : bestCrossVenue.classification === "cross_venue_relative_value"
+          ? bestCrossVenue.resolutionMatchScore * 80
+          : bestCrossVenue.matchScore * 45
+      : 0;
+    const smartScore = candidate.smartMoney?.weightedSmartMoneyScore ?? 0;
+
     if (isPoliticalCandidate(candidate)) {
       candidate.attentionScore = candidate.opportunityScore;
       candidate.discoveryScore = candidate.opportunityScore;
+      candidate.opportunityPacketScore = round(
+        candidate.opportunityScore * 0.75 +
+        makerScore * 0.10 +
+        resolutionSafety * 0.10 +
+        (bestCrossVenue?.classification === "cross_venue_arb_candidate" ? 100 : 0) * 0.05,
+        1
+      );
       continue;
     }
 
@@ -647,6 +794,19 @@ function finalizeDiscoveryScores(candidates: ScanCandidate[]) {
         : candidate.opportunityClass === "top_book_structural_only"
           ? round(Math.max(candidate.opportunityScore, attention * 0.85), 1)
           : round(Math.max(candidate.opportunityScore, attention), 1);
+
+    candidate.opportunityPacketScore = round(
+      Math.min(
+        100,
+        candidate.opportunityScore * 0.30 +
+        (candidate.discoveryScore ?? candidate.opportunityScore) * 0.18 +
+        makerScore * 0.14 +
+        smartScore * 0.14 +
+        crossVenueScore * 0.14 +
+        resolutionSafety * 0.10
+      ),
+      1
+    );
   }
 }
 
@@ -713,6 +873,7 @@ export async function scanClosingSoon(options?: {
     await enrichBehaviorSignals(enriched);
     await enrichExternalEvidence(enriched);
     await enrichHistoricalEvidence(enriched);
+    await enrichAdvancedIntelligence(enriched);
   }
 
   finalizeDiscoveryScores(enriched);
@@ -894,6 +1055,7 @@ export async function scanMultiHorizon(options?: {
     await enrichBehaviorSignals(within24h);
     await enrichExternalEvidence(within24h);
     await enrichHistoricalEvidence(within24h);
+    await enrichAdvancedIntelligence(within24h);
   }
 
   // Historical repetition can still strengthen metadata on structural candidates beyond 24h
