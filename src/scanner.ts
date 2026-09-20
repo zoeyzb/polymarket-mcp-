@@ -671,6 +671,8 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
     let totalNotionalUsd = 0;
     let weightedNumerator = 0;
     let weightedDenominator = 0;
+    let yesWeightedFlow = 0;
+    let noWeightedFlow = 0;
 
     for (const signal of signals) {
       const wallet = String(signal.walletAddress || "");
@@ -693,16 +695,50 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
       const weight = Math.max(1, notional) * categoryMatch;
       weightedNumerator += walletScore * weight;
       weightedDenominator += weight;
+
+      const outcome = String(signal.outcome || "").trim().toLowerCase();
+      const side = String(signal.side || "").trim().toUpperCase();
+      const directionalWeight =
+        Math.log1p(Math.max(0, notional)) *
+        Math.max(0.1, walletScore / 100) *
+        categoryMatch;
+
+      // Map BUY/SELL of YES/NO onto a YES-probability direction.
+      if (
+        (side === "BUY" && outcome === "yes") ||
+        (side === "SELL" && outcome === "no")
+      ) {
+        yesWeightedFlow += directionalWeight;
+      } else if (
+        (side === "BUY" && outcome === "no") ||
+        (side === "SELL" && outcome === "yes")
+      ) {
+        noWeightedFlow += directionalWeight;
+      }
     }
 
     const weightedSmartMoneyScore = weightedDenominator > 0
       ? weightedNumerator / weightedDenominator
       : 0;
+    const directionalTotal = yesWeightedFlow + noWeightedFlow;
+    const yesDirectionalBias = directionalTotal > 0
+      ? (yesWeightedFlow - noWeightedFlow) / directionalTotal
+      : null;
+    const dominantSide =
+      yesDirectionalBias === null
+        ? null
+        : yesDirectionalBias >= 0.25
+          ? "YES" as const
+          : yesDirectionalBias <= -0.25
+            ? "NO" as const
+            : "MIXED" as const;
 
     const flags: string[] = [];
     if (highScoreWallets.size >= 1) flags.push("high_score_wallet_active");
     if (highScoreWallets.size >= 2) flags.push("multi_wallet_alignment_identity_unverified");
     if (totalNotionalUsd >= 10_000) flags.push("large_smart_money_notional");
+    if (dominantSide === "YES" && highScoreWallets.size >= 1) flags.push("smart_money_yes_alignment");
+    if (dominantSide === "NO" && highScoreWallets.size >= 1) flags.push("smart_money_no_alignment");
 
     candidate.smartMoney = {
       signals: signals.slice(0, 25),
@@ -710,6 +746,10 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
       highScoreWallets: highScoreWallets.size,
       totalNotionalUsd: round(totalNotionalUsd, 2),
       weightedSmartMoneyScore: round(weightedSmartMoneyScore, 1),
+      yesDirectionalBias: yesDirectionalBias === null ? null : round(yesDirectionalBias, 4),
+      dominantSide,
+      yesWeightedFlow: round(yesWeightedFlow, 4),
+      noWeightedFlow: round(noWeightedFlow, 4),
       flags
     };
     for (const flag of flags) if (!candidate.flags.includes(flag)) candidate.flags.push(flag);
