@@ -22,6 +22,7 @@ export type MarketCategory =
   | "movies"
   | "business"
   | "mentions"
+  | "five_minute"
   | "weekly"
   | "recurring"
   | "new_listing"
@@ -94,6 +95,17 @@ export function classifyMarketCategories(
   if (/\b(bankruptcy|layoff|ceo|executive turnover|deliveries|business)\b/.test(haystack)) out.add("business");
   if (/\b(mention|mentions|say the word|times will .* say|tweet|post .* times)\b/.test(haystack)) out.add("mentions");
 
+  const eventStart = Date.parse(String((market as any).eventStartTime ?? event.startTime ?? ""));
+  const exactEnd = Date.parse(String(market.endDate ?? ""));
+  const windowMinutes =
+    Number.isFinite(eventStart) && Number.isFinite(exactEnd) && exactEnd > eventStart
+      ? (exactEnd - eventStart) / 60000
+      : null;
+  if (
+    (windowMinutes !== null && windowMinutes >= 4 && windowMinutes <= 6) ||
+    /\b5m\b|5-minute|5 minute/i.test(haystack)
+  ) out.add("five_minute");
+
   if (/\bweekly|this week|next week|week ending\b/.test(haystack)) out.add("weekly");
   if (/\brecurring|monthly|every month|each month|every week|daily recurring\b/.test(haystack)) out.add("recurring");
 
@@ -114,7 +126,7 @@ export function primaryMarketCategory(categories: MarketCategory[]): MarketCateg
   const priority: MarketCategory[] = [
     "elections","politics","nba","basketball","soccer","games_esports","sports",
     "crypto","earnings","fed_rates","economy","finance","geopolitics","weather",
-    "science_climate","tech","movies","culture","business","mentions","weekly",
+    "science_climate","tech","movies","culture","business","mentions","five_minute","weekly",
     "recurring","new_listing","trending","ending_soon","world","other"
   ];
   return priority.find(category => categories.includes(category)) ?? "other";
