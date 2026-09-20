@@ -30,6 +30,7 @@ import {
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
   getOpportunityIntelligenceStats,
+  getPriceBucketCalibration,
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
