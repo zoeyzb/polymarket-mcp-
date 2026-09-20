@@ -628,12 +628,14 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
     // Re-estimate maker adverse-selection risk after behavior enrichment.
     const firstBook = candidate.books?.[0];
     if (firstBook) {
-      candidate.makerEdge = estimateMakerEdge(
+      const priorMaker = candidate.makerEdge;
+      const refreshedMaker = estimateMakerEdge(
         {
           question: candidate.question,
           slug: candidate.slug ?? undefined,
           description: candidate.resolutionRules ?? undefined,
-          resolutionSource: candidate.resolutionSource ?? undefined
+          resolutionSource: candidate.resolutionSource ?? undefined,
+          feesEnabled: priorMaker?.feeEnabled
         },
         candidate.primaryCategory,
         {
@@ -649,6 +651,8 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
         candidate.marketSignals?.priceRegime?.anomalyScore ?? 0,
         candidate.marketSignals?.tradeFlow?.signedImbalance ?? 0
       );
+      if (priorMaker) refreshedMaker.rewardMetadata = priorMaker.rewardMetadata;
+      candidate.makerEdge = refreshedMaker;
     }
 
     candidate.resolutionIntelligence = analyzeResolutionRules(candidate);
@@ -697,12 +701,12 @@ async function enrichAdvancedIntelligence(candidates: ScanCandidate[]) {
 
     const flags: string[] = [];
     if (highScoreWallets.size >= 1) flags.push("high_score_wallet_active");
-    if (highScoreWallets.size >= 2) flags.push("multi_wallet_smart_money_consensus");
+    if (highScoreWallets.size >= 2) flags.push("multi_wallet_alignment_identity_unverified");
     if (totalNotionalUsd >= 10_000) flags.push("large_smart_money_notional");
 
     candidate.smartMoney = {
       signals: signals.slice(0, 25),
-      independentWallets: uniqueWallets.size,
+      uniqueWallets: uniqueWallets.size,
       highScoreWallets: highScoreWallets.size,
       totalNotionalUsd: round(totalNotionalUsd, 2),
       weightedSmartMoneyScore: round(weightedSmartMoneyScore, 1),
