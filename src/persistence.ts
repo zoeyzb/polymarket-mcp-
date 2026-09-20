@@ -859,7 +859,7 @@ export async function persistWalletIntelligenceProfiles(
 ) {
   if (!pool) return { configured: false, reason: "not_configured", profiles: 0, trades: 0 };
   let profileRows = 0;
-  let tradeRows = 0;
+  const tradePayload: Array<Record<string, unknown>> = [];
 
   const client = await pool.connect();
   try {
@@ -930,9 +930,6 @@ export async function persistWalletIntelligenceProfiles(
         const tx = String(trade.transaction_hash || "");
         if (!tx) continue;
         const timestamp = Number(trade.timestamp);
-        const observedAt = Number.isFinite(timestamp)
-          ? new Date(timestamp * 1000).toISOString()
-          : new Date().toISOString();
         const size = Number(trade.size);
         const price = Number(trade.price);
         const title = String(trade.title || "");
@@ -942,39 +939,85 @@ export async function persistWalletIntelligenceProfiles(
           profile.dominantCategory ||
           "other";
 
-        const inserted = await client.query(
-          `insert into polymarket_brain.wallet_trade_signals (
-             transaction_hash, observed_at, wallet_address, condition_id,
-             token_id, side, outcome, title, slug, price, size,
-             notional_usdc, wallet_score, primary_category, payload
-           ) values (
-             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb
-           )
-           on conflict (transaction_hash) do nothing`,
-          [
-            tx,
-            observedAt,
-            profile.walletAddress,
-            trade.condition_id ? String(trade.condition_id) : null,
-            trade.token_id ? String(trade.token_id) : null,
-            trade.side ? String(trade.side) : null,
-            trade.outcome ? String(trade.outcome) : null,
-            title || null,
-            slug || null,
-            Number.isFinite(price) ? price : null,
-            Number.isFinite(size) ? size : null,
-            Number.isFinite(size) && Number.isFinite(price) ? size * price : null,
-            profile.smartScore,
-            category,
-            JSON.stringify(trade)
-          ]
-        );
-        tradeRows += inserted.rowCount ?? 0;
+        tradePayload.push({
+          transaction_hash: tx,
+          observed_at: Number.isFinite(timestamp)
+            ? new Date(timestamp * 1000).toISOString()
+            : new Date().toISOString(),
+          wallet_address: profile.walletAddress,
+          condition_id: trade.condition_id ? String(trade.condition_id) : null,
+          token_id: trade.token_id ? String(trade.token_id) : null,
+          side: trade.side ? String(trade.side) : null,
+          outcome: trade.outcome ? String(trade.outcome) : null,
+          title: title || null,
+          slug: slug || null,
+          price: Number.isFinite(price) ? price : null,
+          size: Number.isFinite(size) ? size : null,
+          notional_usdc:
+            Number.isFinite(size) && Number.isFinite(price)
+              ? size * price
+              : null,
+          wallet_score: profile.smartScore,
+          primary_category: category,
+          payload: trade
+        });
       }
     }
 
+    let tradeRows = 0;
+    if (tradePayload.length) {
+      const inserted = await client.query(
+        `insert into polymarket_brain.wallet_trade_signals (
+           transaction_hash, observed_at, wallet_address, condition_id,
+           token_id, side, outcome, title, slug, price, size,
+           notional_usdc, wallet_score, primary_category, payload
+         )
+         select
+           x.transaction_hash,
+           x.observed_at::timestamptz,
+           x.wallet_address,
+           x.condition_id,
+           x.token_id,
+           x.side,
+           x.outcome,
+           x.title,
+           x.slug,
+           x.price,
+           x.size,
+           x.notional_usdc,
+           x.wallet_score,
+           x.primary_category,
+           x.payload
+         from jsonb_to_recordset($1::jsonb) as x(
+           transaction_hash text,
+           observed_at text,
+           wallet_address text,
+           condition_id text,
+           token_id text,
+           side text,
+           outcome text,
+           title text,
+           slug text,
+           price numeric,
+           size numeric,
+           notional_usdc numeric,
+           wallet_score numeric,
+           primary_category text,
+           payload jsonb
+         )
+         on conflict (transaction_hash) do nothing`,
+        [JSON.stringify(tradePayload)]
+      );
+      tradeRows = inserted.rowCount ?? 0;
+    }
+
     await client.query("commit");
-    return { configured: true, profiles: profileRows, trades: tradeRows };
+    return {
+      configured: true,
+      profiles: profileRows,
+      trades: tradeRows,
+      attemptedTrades: tradePayload.length
+    };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
