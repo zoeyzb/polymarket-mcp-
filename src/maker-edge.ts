@@ -91,10 +91,15 @@ export function estimateMakerEdge(
   tradeImbalance = 0
 ): MakerEdgeEstimate {
   const { feeRate, rebatePoolRate } = feeConfig(primaryCategory);
+  const explicitFeeFlag =
+    (market as any).feesEnabled ??
+    (market as any).fees_enabled;
   const feeEnabled =
-    (market as any).feesEnabled === true ||
-    ((market as any).fees_enabled === true) ||
-    feeRate > 0;
+    explicitFeeFlag === false
+      ? false
+      : explicitFeeFlag === true
+        ? true
+        : feeRate > 0;
 
   const midpoint = book?.midpoint ?? null;
   const spread = book?.spread ?? null;
