@@ -89,6 +89,8 @@ export interface ScanCandidate {
   conditionId: string | null;
   endDate: string;
   minutesRemaining: number;
+  marketWindowMinutes?: number | null;
+  isFiveMinuteMarket?: boolean;
   acceptingOrders: boolean;
   liquidityUsd: number;
   volumeUsd: number;
