@@ -211,6 +211,8 @@ export interface StructuralUniverseResult {
 export interface MultiHorizonScanResult {
   generatedAt: string;
   totalActiveMarketsScanned: number;
+  eligibleMarketsScanned?: number;
+  retainedCandidateCount?: number;
   scanDurationMs: number;
   bufferBps: number;
   lanes: {
