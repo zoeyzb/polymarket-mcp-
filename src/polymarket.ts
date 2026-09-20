@@ -271,6 +271,88 @@ export async function getOrderBooks(tokenIds: string[]): Promise<Map<string, Nor
   return out;
 }
 
+type DataV2Envelope<T> = {
+  data: T;
+  pagination?: {
+    has_more?: boolean;
+    next_cursor?: string | null;
+    limit?: number;
+    offset?: number;
+  };
+};
+
+export async function getLeaderboardV2(
+  limit = 50,
+  timePeriod: "day" | "week" | "month" | "all" = "all",
+  category = "overall",
+  sortBy: "PNL" | "VOLUME" = "PNL"
+): Promise<Array<Record<string, unknown>>> {
+  const params = new URLSearchParams({
+    limit: String(Math.min(1000, Math.max(1, limit))),
+    sort_by: sortBy,
+    time_period: timePeriod,
+    category
+  });
+  const payload = await fetchJson<DataV2Envelope<Array<Record<string, unknown>>>>(
+    `${DATA_BASE}/v2/leaderboard?${params}`
+  );
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+export async function getUserStatsV2(user: string): Promise<Record<string, unknown> | null> {
+  const params = new URLSearchParams({ user });
+  const payload = await fetchJson<DataV2Envelope<Record<string, unknown> | null>>(
+    `${DATA_BASE}/v2/user-stats?${params}`
+  );
+  return payload?.data && typeof payload.data === "object" ? payload.data : null;
+}
+
+export async function getUserPositionsV2(
+  user: string,
+  status: "OPEN" | "REDEEMABLE" | "CLOSED" = "CLOSED",
+  limit = 200
+): Promise<Array<Record<string, unknown>>> {
+  const params = new URLSearchParams({
+    user,
+    status,
+    limit: String(Math.min(1000, Math.max(1, limit))),
+    sort_by: status === "CLOSED" ? "REALIZED_PNL" : "CURRENT_VALUE",
+    sort_direction: "DESC"
+  });
+  const payload = await fetchJson<DataV2Envelope<Array<Record<string, unknown>>>>(
+    `${DATA_BASE}/v2/positions?${params}`
+  );
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+export async function getUserTradesV2(
+  user: string,
+  limit = 100
+): Promise<Array<Record<string, unknown>>> {
+  const params = new URLSearchParams({
+    user,
+    limit: String(Math.min(1000, Math.max(1, limit)))
+  });
+  const payload = await fetchJson<DataV2Envelope<Array<Record<string, unknown>>>>(
+    `${DATA_BASE}/v2/trades?${params}`
+  );
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+export async function getConditionTradesV2(
+  conditionId: string,
+  limit = 100
+): Promise<Array<Record<string, unknown>>> {
+  const params = new URLSearchParams({
+    condition: conditionId,
+    limit: String(Math.min(1000, Math.max(1, limit)))
+  });
+  const payload = await fetchJson<DataV2Envelope<Array<Record<string, unknown>>>>(
+    `${DATA_BASE}/v2/trades?${params}`
+  );
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
 export async function getRecentTrades(conditionId: string, limit = 100): Promise<unknown[]> {
   const params = new URLSearchParams({
     market: conditionId,
