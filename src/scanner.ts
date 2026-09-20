@@ -1096,6 +1096,50 @@ function compactLongDatedCandidate(candidate: ScanCandidate) {
   return candidate;
 }
 
+function compactNegRiskMarket(market: GammaMarket): GammaMarket {
+  return {
+    id: market.id,
+    question: market.question,
+    conditionId: market.conditionId,
+    slug: market.slug,
+    endDate: market.endDate,
+    endDateIso: market.endDateIso,
+    active: market.active,
+    closed: market.closed,
+    acceptingOrders: market.acceptingOrders,
+    negRisk: market.negRisk,
+    enableNegRisk: market.enableNegRisk,
+    negRiskAugmented: market.negRiskAugmented,
+    clobTokenIds: market.clobTokenIds,
+    outcomes: market.outcomes,
+    events: market.events?.map(event => ({
+      id: event.id,
+      slug: event.slug,
+      title: event.title,
+      negRisk: event.negRisk,
+      enableNegRisk: event.enableNegRisk,
+      negRiskAugmented: event.negRiskAugmented
+    }))
+  };
+}
+
+function gammaSuggestsBookCheck(market: GammaMarket) {
+  const prices = parseNumberArray(market.outcomePrices);
+  if (prices.length === 2) {
+    const total = prices[0] + prices[1];
+    if (total < 0.985 || total > 1.015) return true;
+  }
+
+  const spread = n((market as any).spread);
+  const bestBid = n((market as any).bestBid);
+  const bestAsk = n((market as any).bestAsk);
+  if (spread > 0 && spread <= 0.015 && bestBid > 0 && bestAsk > 0) {
+    return true;
+  }
+
+  return false;
+}
+
 function buildLane(
   key: MultiHorizonLane["key"],
   maxMinutes: number,
@@ -1148,26 +1192,58 @@ export async function scanMultiHorizon(options?: {
     eligibleMarketsScanned += eligible.length;
     if (!eligible.length) continue;
 
+    const prelim: Array<{ market: GammaMarket; candidate: ScanCandidate }> = [];
+    const bookMarkets: GammaMarket[] = [];
+
     for (const market of eligible) {
       const end = getEndDate(market);
       if (end) {
         const ts = Date.parse(end);
         if (Number.isFinite(ts)) latestEndTs = Math.max(latestEndTs, ts);
       }
+
       const meta = eventMeta(market);
-      if (meta?.negRisk && !meta.augmented) negRiskMarkets.push(market);
+      if (meta?.negRisk && !meta.augmented) {
+        negRiskMarkets.push(compactNegRiskMarket(market));
+      }
+
+      const candidate = await enrichMarket(
+        market,
+        now,
+        false,
+        new Map<string, NormalizedBook>(),
+        bufferBps
+      );
+      if (!candidate) continue;
+      prelim.push({ market, candidate });
+
+      if (
+        candidate.minutesRemaining <= 1440 ||
+        gammaSuggestsBookCheck(market)
+      ) {
+        bookMarkets.push(market);
+      }
     }
 
-    const tokenIds = [...new Set(
-      eligible.flatMap(market => parseStringArray(market.clobTokenIds))
-    )];
-    const pageBooks = await getOrderBooks(tokenIds);
+    let booksByToken = new Map<string, NormalizedBook>();
+    if (bookMarkets.length) {
+      const tokenIds = [...new Set(
+        bookMarkets.flatMap(market => parseStringArray(market.clobTokenIds))
+      )];
+      booksByToken = await getOrderBooks(tokenIds);
+    }
 
-    const pageCandidates = (await Promise.all(
-      eligible.map(market => enrichMarket(market, now, true, pageBooks, bufferBps))
-    )).filter((candidate): candidate is ScanCandidate => candidate !== null);
+    const bookMarketKeys = new Set(
+      bookMarkets.map(market => String(market.id || market.conditionId || market.slug || ""))
+    );
 
-    for (const candidate of pageCandidates) {
+    for (const { market, candidate: prelimCandidate } of prelim) {
+      const key = String(market.id || market.conditionId || market.slug || "");
+      const candidate = bookMarketKeys.has(key)
+        ? await enrichMarket(market, now, true, booksByToken, bufferBps)
+        : prelimCandidate;
+      if (!candidate) continue;
+
       const keep =
         candidate.minutesRemaining <= 1440 ||
         candidate.opportunityClass !== "research_candidate" ||
