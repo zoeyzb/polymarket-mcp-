@@ -20,6 +20,7 @@ import { classifyMarketCategories, primaryMarketCategory } from "./category-taxo
 import { estimateMakerEdge } from "./maker-edge.js";
 import { analyzeResolutionRules } from "./resolution-intelligence.js";
 import { listOpenKalshiMarkets, matchCandidateToKalshi } from "./cross-venue.js";
+import { findStructuralGraphViolations } from "./structural-graph.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -1097,6 +1098,7 @@ export async function scanMultiHorizon(options?: {
     bufferBps
   );
 
+  const logicalViolations = findStructuralGraphViolations(enrichedAll);
   const scanDurationMs = Date.now() - started;
 
   return {
@@ -1122,6 +1124,7 @@ export async function scanMultiHorizon(options?: {
           basket.bestNetProfitUsd <= 0 &&
           basket.flags.includes("top_book_complete_set_edge")
         ).length
-    }
+    },
+    logicalViolations
   };
 }
