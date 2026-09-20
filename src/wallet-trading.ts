@@ -1,4 +1,4 @@
-import { getOrderBook } from "./polymarket.js";
+import { getOrderBook, getUserPositionsV2, getUserStatsV2 } from "./polymarket.js";
 
 export type TradeSide = "BUY" | "SELL";
 export type TradeOrderType = "LIMIT" | "MARKET";
@@ -284,5 +284,40 @@ export async function previewTrade(input: TradePreviewInput): Promise<TradePrevi
     submissionEnabled,
     note:
       "Non-custodial flow: the server may prepare and validate an order, but the configured wallet must sign the final Polymarket order. Never store a seed phrase or raw private key in this service."
+  };
+}
+
+
+export async function getWalletPortfolio(profile: WalletProfile | null) {
+  if (!profile?.configured || !profile.walletAddress) {
+    return {
+      configured: false,
+      walletAddress: null,
+      stats: null,
+      openPositions: []
+    };
+  }
+
+  const lookupAddress =
+    profile.proxyWallet ||
+    profile.funderAddress ||
+    profile.walletAddress;
+
+  const [stats, openPositions] = await Promise.all([
+    getUserStatsV2(lookupAddress).catch(() => null),
+    getUserPositionsV2(lookupAddress, "OPEN", 500).catch(() => [])
+  ]);
+
+  return {
+    configured: true,
+    walletAddress: profile.walletAddress,
+    lookupAddress,
+    chainId: profile.chainId,
+    walletType: profile.walletType,
+    signatureType: profile.signatureType,
+    stats,
+    openPositions,
+    signingMode: "user_wallet_signature",
+    privateKeyStored: false
   };
 }
