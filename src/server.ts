@@ -28,21 +28,28 @@ import {
   getCalibrationStats,
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
+  getOpportunityIntelligenceStats,
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
   getPersistentStats,
   getRecentAlerts,
+  getRecentCrossVenueMatches,
+  getRecentOpportunityPackets,
   getResolutionStats,
   getRealtimeTargets,
   getRealtimeTargetStats,
   getStreamPersistenceStats,
   getUnresolvedObservedMarkets,
   getWorkerHeartbeats,
+  getTopWalletIntelligence,
+  getWalletIntelligenceStats,
   persistAlertsFromScan,
+  persistOpportunityPackets,
   persistRealtimeQuotes,
   persistScan,
   persistSportsEvents,
+  persistWalletIntelligenceProfiles,
   replaceRealtimeTargets,
   persistenceConfig,
   recordResolution,
@@ -55,6 +62,7 @@ import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
 import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
+import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -693,6 +701,48 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "wallets.top",
+    {
+      description: "Return persisted high-sample Polymarket wallet intelligence ranked by conservative smart-money score. This is a research signal, not a copy-trading recommendation.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(50)
+      }
+    },
+    async input => textResult({
+      stats: await getWalletIntelligenceStats(),
+      wallets: await getTopWalletIntelligence(input.limit)
+    })
+  );
+
+  server.registerTool(
+    "markets.cross_venue",
+    {
+      description: "Return recent Polymarket-Kalshi semantic/rules matches. Only rows clearing strict matching and a conservative fee buffer are labeled cross-venue arb candidates.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(100)
+      }
+    },
+    async input => textResult({
+      stats: await getOpportunityIntelligenceStats(),
+      matches: await getRecentCrossVenueMatches(input.limit)
+    })
+  );
+
+  server.registerTool(
+    "markets.opportunity_packets",
+    {
+      description: "Return unified opportunity packets combining structural edge, maker economics, wallet flow, cross-venue evidence, behavior, external evidence, resolution risk and historical calibration.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(100)
+      }
+    },
+    async input => textResult({
+      stats: await getOpportunityIntelligenceStats(),
+      packets: await getRecentOpportunityPackets(input.limit)
+    })
+  );
+
+  server.registerTool(
     "system.calibration",
     {
       description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
@@ -896,6 +946,30 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/wallets") {
+    json(res, 200, {
+      stats: await getWalletIntelligenceStats().catch(error => ({ error: errorMessage(error) })),
+      wallets: await getTopWalletIntelligence(numberParam(url, "limit", 50, 1, 200)).catch(() => [])
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/cross-venue") {
+    json(res, 200, {
+      stats: await getOpportunityIntelligenceStats().catch(error => ({ error: errorMessage(error) })),
+      matches: await getRecentCrossVenueMatches(numberParam(url, "limit", 100, 1, 500)).catch(() => [])
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/opportunity-packets") {
+    json(res, 200, {
+      stats: await getOpportunityIntelligenceStats().catch(error => ({ error: errorMessage(error) })),
+      packets: await getRecentOpportunityPackets(numberParam(url, "limit", 100, 1, 500)).catch(() => [])
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/calibration") {
     json(res, 200, await getCalibrationStats().catch(error => ({ error: errorMessage(error) })));
     return true;
@@ -998,6 +1072,9 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
       alerts: "/api/alerts?limit=100",
+      wallets: "/api/wallets?limit=50",
+      crossVenue: "/api/cross-venue?limit=100",
+      opportunityPackets: "/api/opportunity-packets?limit=100",
       calibration: "/api/calibration",
       historicalCalibration: "/api/historical-calibration",
       resolutionHistory: "/api/resolution-history"
@@ -1067,6 +1144,7 @@ async function runWorkerHeartbeat() {
     }
     if (ROLE_HISTORY) {
       details.historicalCalibration = await getHistoricalCalibrationSummary().catch(() => null);
+      details.walletIntelligence = await getWalletIntelligenceStats().catch(() => null);
     }
     if (ROLE_MAINTENANCE) {
       details.maintenance = await getMaintenanceStats().catch(() => null);
@@ -1091,6 +1169,7 @@ let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
 let quoteCompactionRunning = false;
 let historicalBackfillRunning = false;
+let walletIntelligenceRunning = false;
 let maintenanceRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
@@ -1099,6 +1178,8 @@ const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTIO
 const HISTORICAL_BACKFILL_SECONDS = Math.max(300, Number(process.env.HISTORICAL_BACKFILL_SECONDS || 900));
 const HISTORICAL_LOOKBACK_HOURS = Math.max(6, Math.min(168, Number(process.env.HISTORICAL_LOOKBACK_HOURS || 48)));
 const HISTORICAL_BACKFILL_LIMIT = Math.max(1, Math.min(100, Number(process.env.HISTORICAL_BACKFILL_LIMIT || 40)));
+const WALLET_INTELLIGENCE_SECONDS = Math.max(900, Number(process.env.WALLET_INTELLIGENCE_SECONDS || 1800));
+const WALLET_INTELLIGENCE_LIMIT = Math.max(5, Math.min(100, Number(process.env.WALLET_INTELLIGENCE_LIMIT || 25)));
 const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
 const RAW_QUOTE_RETENTION_HOURS = Math.max(24, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 72));
 const SPORTS_EVENT_RETENTION_DAYS = Math.max(7, Number(process.env.SPORTS_EVENT_RETENTION_DAYS || 30));
@@ -1154,6 +1235,18 @@ async function runBackgroundScan() {
       console.error(JSON.stringify({
         level: "error",
         message: "alert_persistence_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      }));
+    });
+
+    await persistOpportunityPackets(
+      multi.generatedAt,
+      [...alertCandidates.values()]
+    ).catch(error => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "opportunity_packet_persistence_failed",
         error: errorMessage(error),
         at: new Date().toISOString()
       }));
@@ -1307,6 +1400,32 @@ async function runMaintenanceWorker() {
     }));
   } finally {
     maintenanceRunning = false;
+  }
+}
+
+async function runWalletIntelligenceWorker() {
+  if (walletIntelligenceRunning) return;
+  walletIntelligenceRunning = true;
+  try {
+    const profiles = await fetchTopWalletProfiles(WALLET_INTELLIGENCE_LIMIT);
+    const persisted = await persistWalletIntelligenceProfiles(profiles);
+    console.log(JSON.stringify({
+      level: "info",
+      message: "wallet_intelligence_refresh",
+      requested: WALLET_INTELLIGENCE_LIMIT,
+      profiles: profiles.length,
+      persisted,
+      at: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "wallet_intelligence_refresh_failed",
+      error: errorMessage(error),
+      at: new Date().toISOString()
+    }));
+  } finally {
+    walletIntelligenceRunning = false;
   }
 }
 
@@ -1492,6 +1611,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     setInterval(() => {
       runHistoricalBackfillWorker().catch(() => {});
     }, HISTORICAL_BACKFILL_SECONDS * 1000).unref();
+
+    runWalletIntelligenceWorker().catch(() => {});
+    setInterval(() => {
+      runWalletIntelligenceWorker().catch(() => {});
+    }, WALLET_INTELLIGENCE_SECONDS * 1000).unref();
   }
 
   if (ROLE_MAINTENANCE) {
