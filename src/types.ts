@@ -144,6 +144,7 @@ export interface ScanCandidate {
   makerEdge?: import("./maker-edge.js").MakerEdgeEstimate | null;
   resolutionIntelligence?: import("./resolution-intelligence.js").ResolutionIntelligence | null;
   crossVenue?: import("./cross-venue.js").CrossVenueMatch[];
+  logicalRelations?: import("./structural-graph.js").StructuralGraphViolation[];
   smartMoney?: {
     signals: Array<Record<string, unknown>>;
     independentWallets: number;
