@@ -775,6 +775,18 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "system.price_bucket_calibration",
+    {
+      description: "Return this system's empirical Polymarket calibration curve from resolved non-political markets, grouped by domain, horizon and implied-probability bucket. Useful for testing longshot/favorite bias without importing another venue's coefficients.",
+      inputSchema: {
+        bucketSize: z.number().min(0.01).max(0.25).default(0.05),
+        minSamples: z.number().int().min(1).max(1000).default(5)
+      }
+    },
+    async input => textResult(await getPriceBucketCalibration(input))
+  );
+
+  server.registerTool(
     "system.calibration",
     {
       description: "Return empirical persistence/calibration statistics from durable historical scans, including repeated-market observations and structural-edge persistence."
@@ -1011,6 +1023,14 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/price-bucket-calibration") {
+    json(res, 200, await getPriceBucketCalibration({
+      bucketSize: Number(url.searchParams.get("bucketSize") || 0.05),
+      minSamples: numberParam(url, "minSamples", 5, 1, 1000)
+    }).catch(error => ({ error: errorMessage(error) })));
+    return true;
+  }
+
   if (url.pathname === "/api/calibration") {
     json(res, 200, await getCalibrationStats().catch(error => ({ error: errorMessage(error) })));
     return true;
@@ -1118,6 +1138,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       crossVenue: "/api/cross-venue?limit=100",
       opportunityPackets: "/api/opportunity-packets?limit=100",
       calibration: "/api/calibration",
+      priceBucketCalibration: "/api/price-bucket-calibration?bucketSize=0.05&minSamples=5",
       historicalCalibration: "/api/historical-calibration",
       resolutionHistory: "/api/resolution-history"
     });
