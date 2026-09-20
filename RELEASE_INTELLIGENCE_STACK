@@ -1,6 +1,8 @@
-release=2026-09-20T02:10Z
-verified_head=8c77c7f0613cbb78a483044b82b6a414101a4169
+release=2026-09-20T02:35Z
+verified_head=c6965b542a985af115801d925babc0ce5cc4b591
 typecheck=passed
 tests=passed
 build=passed
-features=gamma-keyset-full-universe,precise-5m-market-end-times,five-minute-market-classification,five-minute-ohlc-bars,chart-5m-api
+features=full-universe-keyset,5m-markets,5m-charts,wallet-profile,wallet-portfolio,trade-preview,trade-intents,non-custodial-signing-gate
+trading_enabled=false
+trade_intents_enabled=false
