@@ -1008,6 +1008,162 @@ export async function getWalletIntelligenceStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function persistOpportunityPackets(
+  generatedAt: string,
+  candidates: import("./types.js").ScanCandidate[]
+) {
+  if (!pool) return { configured: false, reason: "not_configured", packets: 0, crossVenue: 0 };
+  let packets = 0;
+  let crossVenue = 0;
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    for (const candidate of candidates) {
+      if (!candidate.conditionId) continue;
+      const payload = {
+        structural: {
+          opportunityClass: candidate.opportunityClass,
+          opportunityScore: candidate.opportunityScore,
+          binaryArbitrage: candidate.binaryArbitrage ?? null
+        },
+        makerEdge: candidate.makerEdge ?? null,
+        smartMoney: candidate.smartMoney ?? null,
+        crossVenue: candidate.crossVenue ?? [],
+        behavior: candidate.marketSignals ?? null,
+        externalEvidence: candidate.externalEvidence ?? null,
+        resolutionIntelligence: candidate.resolutionIntelligence ?? null,
+        historicalEvidence: candidate.historicalEvidence ?? null,
+        categories: candidate.categories,
+        flags: candidate.flags
+      };
+
+      const result = await client.query(
+        `insert into polymarket_brain.opportunity_packets (
+           generated_at, condition_id, question, primary_category,
+           packet_score, payload
+         ) values ($1,$2,$3,$4,$5,$6::jsonb)
+         on conflict (condition_id, generated_at) do update set
+           packet_score = excluded.packet_score,
+           payload = excluded.payload`,
+        [
+          generatedAt,
+          candidate.conditionId,
+          candidate.question,
+          candidate.primaryCategory,
+          candidate.opportunityPacketScore ?? candidate.discoveryScore ?? candidate.opportunityScore,
+          JSON.stringify(payload)
+        ]
+      );
+      packets += result.rowCount ?? 0;
+
+      for (const match of candidate.crossVenue || []) {
+        if (match.matchScore < 0.68) continue;
+        const inserted = await client.query(
+          `insert into polymarket_brain.cross_venue_matches (
+             observed_at, polymarket_condition_id, polymarket_question,
+             kalshi_ticker, kalshi_title, match_score, resolution_match_score,
+             polymarket_yes, polymarket_no, kalshi_yes, kalshi_no,
+             best_complement_cost, gross_edge, classification, details
+           ) values (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb
+           )
+           on conflict (polymarket_condition_id, kalshi_ticker, observed_at) do nothing`,
+          [
+            generatedAt,
+            candidate.conditionId,
+            candidate.question,
+            match.kalshiTicker,
+            match.kalshiTitle,
+            match.matchScore,
+            match.resolutionMatchScore,
+            match.polymarketYesAsk,
+            match.polymarketNoAsk,
+            match.kalshiYesAsk,
+            match.kalshiNoAsk,
+            match.bestComplementCost,
+            match.grossEdge,
+            match.classification,
+            JSON.stringify(match)
+          ]
+        );
+        crossVenue += inserted.rowCount ?? 0;
+      }
+    }
+
+    await client.query("commit");
+    return { configured: true, packets, crossVenue };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getRecentOpportunityPackets(limit = 100) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(500, limit));
+  const { rows } = await pool.query(
+    `select
+       generated_at as "generatedAt",
+       condition_id as "conditionId",
+       question,
+       primary_category as "primaryCategory",
+       packet_score::float8 as "packetScore",
+       payload
+     from polymarket_brain.opportunity_packets
+     order by generated_at desc, packet_score desc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}
+
+export async function getRecentCrossVenueMatches(limit = 100) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(500, limit));
+  const { rows } = await pool.query(
+    `select
+       observed_at as "observedAt",
+       polymarket_condition_id as "polymarketConditionId",
+       polymarket_question as "polymarketQuestion",
+       kalshi_ticker as "kalshiTicker",
+       kalshi_title as "kalshiTitle",
+       match_score::float8 as "matchScore",
+       resolution_match_score::float8 as "resolutionMatchScore",
+       polymarket_yes::float8 as "polymarketYes",
+       polymarket_no::float8 as "polymarketNo",
+       kalshi_yes::float8 as "kalshiYes",
+       kalshi_no::float8 as "kalshiNo",
+       best_complement_cost::float8 as "bestComplementCost",
+       gross_edge::float8 as "grossEdge",
+       classification,
+       details
+     from polymarket_brain.cross_venue_matches
+     order by observed_at desc,
+       case when classification='cross_venue_arb_candidate' then 0 else 1 end,
+       gross_edge desc nulls last
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}
+
+export async function getOpportunityIntelligenceStats() {
+  if (!pool) return { configured: false, reason: "not_configured" };
+  const { rows } = await pool.query(`
+    select
+      (select count(*)::int from polymarket_brain.opportunity_packets) as "packets",
+      (select max(generated_at) from polymarket_brain.opportunity_packets) as "lastPacketAt",
+      (select count(*)::int from polymarket_brain.cross_venue_matches) as "crossVenueMatches",
+      (select count(*)::int from polymarket_brain.cross_venue_matches where classification='cross_venue_arb_candidate') as "crossVenueArbCandidates",
+      (select max(observed_at) from polymarket_brain.cross_venue_matches) as "lastCrossVenueAt"
+  `);
+  return { configured: true, ...rows[0] };
+}
+
 export async function getPersistentStats() {
   if (!pool) return { configured: false, reason: "not_configured" };
 
