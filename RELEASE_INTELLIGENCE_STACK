@@ -1,8 +1,8 @@
-release=2026-09-20T04:07Z
-verified_head=a398fd59b6f53b547607c3eb68af4c15947f01ed
+release=2026-09-20T04:14Z
+verified_head=8e92dacf6faf5c9a33100bb33c31a5ab8c8ab041
 typecheck=passed
 tests=passed
 build=passed
-features=scanner-snapshot-cache,narrow-urgent-scan,selective-clob-depth,streamed-gamma-pages,5m-markets,5m-charts,wallet-control-plane,cancel-all,cancel-order,cancel-market
+features=scanner-snapshot-cache,narrow-urgent-scan,selective-clob-depth,negrisk-prefilter,streamed-gamma-pages,5m-markets,5m-charts,wallet-control-plane,cancel-all,cancel-order,cancel-market
 trading_enabled=false
 trade_intents_enabled=false
