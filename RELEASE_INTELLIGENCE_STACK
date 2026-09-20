@@ -1,0 +1,4 @@
+release=2026-09-20T01:26Z
+verified_head=2041bdb621031677fea7d790d6b44a03500f81c2
+tests=37
+features=wallet-intelligence,maker-edge,cross-venue,resolution-intelligence,behavior-backtest,digital-fair-value,structural-graph,price-bucket-calibration,opportunity-packets
