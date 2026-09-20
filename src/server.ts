@@ -52,6 +52,8 @@ import {
   getTradeControlStats,
   listTradeIntents,
   createTradeIntent,
+  createTradingControlRequest,
+  listTradingControlRequests,
   persistAlertsFromScan,
   persistOpportunityPackets,
   persistRealtimeQuotes,
@@ -831,6 +833,76 @@ export function createMcpServer() {
         submitted: false
       });
     }
+  );
+
+  server.registerTool(
+    "trading.stop_all",
+    {
+      description: "Create a CANCEL_ALL control request for the configured Polymarket wallet. This is the kill-switch path. It does not bypass wallet authorization; the request remains AWAITING_SIGNATURE until the connected signer authorizes Polymarket cancelAll()."
+    },
+    async () => textResult({
+      ok: true,
+      request: await createTradingControlRequest({
+        walletProfileId: "primary",
+        action: "CANCEL_ALL"
+      }),
+      signingRequired: true,
+      submitted: false
+    })
+  );
+
+  server.registerTool(
+    "trading.cancel_order",
+    {
+      description: "Create an authenticated cancellation request for one Polymarket order. Requires the connected wallet signer before submission.",
+      inputSchema: {
+        orderId: z.string().min(1)
+      }
+    },
+    async input => textResult({
+      ok: true,
+      request: await createTradingControlRequest({
+        walletProfileId: "primary",
+        action: "CANCEL_ORDER",
+        orderId: input.orderId
+      }),
+      signingRequired: true,
+      submitted: false
+    })
+  );
+
+  server.registerTool(
+    "trading.cancel_market",
+    {
+      description: "Create an authenticated request to cancel all open orders for one Polymarket market/condition. Requires the connected wallet signer before submission.",
+      inputSchema: {
+        marketId: z.string().min(1)
+      }
+    },
+    async input => textResult({
+      ok: true,
+      request: await createTradingControlRequest({
+        walletProfileId: "primary",
+        action: "CANCEL_MARKET",
+        marketId: input.marketId
+      }),
+      signingRequired: true,
+      submitted: false
+    })
+  );
+
+  server.registerTool(
+    "trading.control_requests",
+    {
+      description: "List cancel-all, cancel-order and cancel-market control requests and their signing/submission state.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(50)
+      }
+    },
+    async input => textResult({
+      stats: await getTradeControlStats(),
+      requests: await listTradingControlRequests(input.limit)
+    })
   );
 
   server.registerTool(
