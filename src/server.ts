@@ -31,6 +31,7 @@ import {
   getHistoricalCandidateStats,
   getOpportunityIntelligenceStats,
   getPriceBucketCalibration,
+  getQuoteBars,
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
@@ -854,6 +855,35 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.chart_5m",
+    {
+      description: "Return a 5-minute price chart for any Polymarket outcome token. Uses durable local OHLC/spread bars when available and falls back to official CLOB 5-minute price history for untracked tokens.",
+      inputSchema: {
+        tokenId: z.string().min(1),
+        hours: z.number().int().min(1).max(720).default(24),
+        limit: z.number().int().min(1).max(5000).default(500)
+      }
+    },
+    async input => {
+      const bars = await getQuoteBars(input.tokenId, "5m", input.hours, input.limit);
+      if (bars.length) {
+        return textResult({
+          tokenId: input.tokenId,
+          interval: "5m",
+          source: "local_realtime_ohlc",
+          bars
+        });
+      }
+      return textResult({
+        tokenId: input.tokenId,
+        interval: "5m",
+        source: "polymarket_clob_prices_history",
+        history: await getPriceHistory(input.tokenId, input.hours, 5)
+      });
+    }
+  );
+
+  server.registerTool(
     "markets.price_history",
     {
       description: "Get CLOB price history for an outcome token ID.",
@@ -936,6 +966,33 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
 
   if (url.pathname === "/api/realtime-health") {
     json(res, 200, realtimeTracker.getHealth());
+    return true;
+  }
+
+  if (url.pathname === "/api/chart-5m") {
+    const tokenId = url.searchParams.get("tokenId") || "";
+    if (!tokenId) {
+      json(res, 400, { error: "tokenId_required" });
+      return true;
+    }
+    const hours = numberParam(url, "hours", 24, 1, 720);
+    const limit = numberParam(url, "limit", 500, 1, 5000);
+    const bars = await getQuoteBars(tokenId, "5m", hours, limit).catch(() => []);
+    if (bars.length) {
+      json(res, 200, {
+        tokenId,
+        interval: "5m",
+        source: "local_realtime_ohlc",
+        bars
+      });
+    } else {
+      json(res, 200, {
+        tokenId,
+        interval: "5m",
+        source: "polymarket_clob_prices_history",
+        history: await getPriceHistory(tokenId, hours, 5)
+      });
+    }
     return true;
   }
 
@@ -1134,6 +1191,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
       alerts: "/api/alerts?limit=100",
+      chart5m: "/api/chart-5m?tokenId=<token>&hours=24&limit=500",
       behaviorBacktest: "/api/behavior-backtest?lookbackDays=14&shockThresholdPct=10&minSamples=5",
       wallets: "/api/wallets?limit=50",
       crossVenue: "/api/cross-venue?limit=100",
