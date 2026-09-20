@@ -60,12 +60,10 @@ type GammaKeysetResponse = {
   next_cursor?: string;
 };
 
-export async function listAllActiveMarkets(maxPages = 2000, pageSize = 100): Promise<GammaMarket[]> {
-  if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
-    return activeMarketCache.markets;
-  }
-
-  const byKey = new Map<string, GammaMarket>();
+export async function* iterateActiveMarketPages(
+  maxPages = 2000,
+  pageSize = 100
+): AsyncGenerator<GammaMarket[], void, unknown> {
   const boundedPageSize = Math.max(1, Math.min(100, pageSize));
   let cursor = "";
   const seenCursors = new Set<string>();
@@ -80,23 +78,42 @@ export async function listAllActiveMarkets(maxPages = 2000, pageSize = 100): Pro
     const payload = await fetchJson<GammaKeysetResponse>(
       `${GAMMA_BASE}/markets/keyset?${params}`
     );
-    const batch = Array.isArray(payload?.markets) ? payload.markets : [];
-    if (!batch.length) break;
+    const raw = Array.isArray(payload?.markets) ? payload.markets : [];
+    if (!raw.length) break;
 
-    for (const market of batch) {
-      if (market.active === false || market.closed === true) continue;
-      const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
-      byKey.set(key, market);
-    }
+    const active = raw.filter(market =>
+      market.active !== false &&
+      market.closed !== true
+    );
+    if (active.length) yield active;
 
     const next = String(payload.next_cursor || "");
     if (!next || next === cursor || seenCursors.has(next)) break;
     seenCursors.add(next);
     cursor = next;
   }
+}
+
+export async function listAllActiveMarkets(maxPages = 2000, pageSize = 100): Promise<GammaMarket[]> {
+  if (activeMarketCache && Date.now() - activeMarketCache.at < ACTIVE_CACHE_MS) {
+    return activeMarketCache.markets;
+  }
+
+  const byKey = new Map<string, GammaMarket>();
+  let page = 0;
+  for await (const batch of iterateActiveMarketPages(maxPages, pageSize)) {
+    for (const market of batch) {
+      const key = String(market.id || market.conditionId || market.slug || `${page}-${byKey.size}`);
+      byKey.set(key, market);
+    }
+    page += 1;
+  }
 
   const markets = [...byKey.values()];
-  activeMarketCache = { at: Date.now(), markets };
+  // Avoid caching extremely large universes in-process.
+  if (markets.length <= Math.max(1000, Number(process.env.ACTIVE_MARKET_CACHE_MAX || 5000))) {
+    activeMarketCache = { at: Date.now(), markets };
+  }
   return markets;
 }
 
@@ -204,16 +221,18 @@ export async function getMarketBySlug(slug: string): Promise<GammaMarket | null>
 export async function searchActiveMarkets(query: string, limit = 25): Promise<GammaMarket[]> {
   const needle = query.trim().toLowerCase();
   if (!needle) return [];
-  const markets = await listAllActiveMarkets();
-  return markets
-    .filter(m => {
-      const haystack = [m.question, m.description, m.slug]
+  const out: GammaMarket[] = [];
+  for await (const batch of iterateActiveMarketPages()) {
+    for (const market of batch) {
+      const haystack = [market.question, market.description, market.slug]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      return haystack.includes(needle);
-    })
-    .slice(0, limit);
+      if (haystack.includes(needle)) out.push(market);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
 }
 
 function normalizeLevels(levels: OrderLevel[] | undefined, direction: "bid" | "ask") {
