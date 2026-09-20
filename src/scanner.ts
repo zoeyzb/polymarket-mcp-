@@ -270,6 +270,15 @@ function yesTokenId(market: GammaMarket): string | null {
   return yesIndex >= 0 && tokenIds[yesIndex] ? tokenIds[yesIndex] : null;
 }
 
+function yesDisplayedPrice(market: GammaMarket): number | null {
+  const outcomes = parseStringArray(market.outcomes);
+  const prices = parseNumberArray(market.outcomePrices);
+  const yesIndex = outcomes.findIndex(outcome => outcome.trim().toLowerCase() === "yes");
+  if (yesIndex < 0) return null;
+  const value = prices[yesIndex];
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
 async function buildEventBasketOpportunities(
   allActive: GammaMarket[],
   now: number,
@@ -293,6 +302,19 @@ async function buildEventBasketOpportunities(
   const results: EventBasketOpportunity[] = [];
   for (const [eventId, group] of groups) {
     if (!group.negRisk || group.augmented || group.markets.length < 3) continue;
+
+    // Cheap full-universe prefilter: only spend authoritative-event and CLOB calls
+    // on sets whose displayed YES prices are close enough to a complete-set edge.
+    // Missing displayed prices still proceed to exact verification.
+    const displayedYes = group.markets.map(yesDisplayedPrice);
+    if (displayedYes.every((value): value is number => value !== null)) {
+      const displayedTotal = displayedYes.reduce((sum, value) => sum + value, 0);
+      const prefilterCeiling = Math.max(
+        1,
+        Number(process.env.NEGRISK_DISPLAYED_PREFILTER_MAX || 1.03)
+      );
+      if (displayedTotal > prefilterCeiling) continue;
+    }
 
     const completeWindow = group.markets.every(market => {
       const end = getEndDate(market);
