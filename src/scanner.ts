@@ -1099,6 +1099,40 @@ export async function scanMultiHorizon(options?: {
   );
 
   const logicalViolations = findStructuralGraphViolations(enrichedAll);
+  if (logicalViolations.length) {
+    const byCondition = new Map<string, typeof logicalViolations>();
+    for (const violation of logicalViolations) {
+      for (const conditionId of [
+        violation.easierConditionId,
+        violation.harderConditionId
+      ]) {
+        if (!conditionId) continue;
+        const existing = byCondition.get(conditionId) || [];
+        existing.push(violation);
+        byCondition.set(conditionId, existing);
+      }
+    }
+
+    for (const candidate of enrichedAll) {
+      if (!candidate.conditionId) continue;
+      const relations = byCondition.get(candidate.conditionId);
+      if (!relations?.length) continue;
+      candidate.logicalRelations = relations.slice(0, 10);
+      if (!candidate.flags.includes("logical_relative_value_candidate")) {
+        candidate.flags.push("logical_relative_value_candidate");
+      }
+      if (!isPoliticalCandidate(candidate)) {
+        candidate.opportunityPacketScore = round(
+          Math.min(
+            100,
+            (candidate.opportunityPacketScore ?? candidate.discoveryScore ?? candidate.opportunityScore) +
+            Math.min(12, relations[0].violationProbabilityPoints * 0.4)
+          ),
+          1
+        );
+      }
+    }
+  }
   const scanDurationMs = Date.now() - started;
 
   return {
