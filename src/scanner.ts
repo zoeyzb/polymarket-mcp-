@@ -46,8 +46,10 @@ function round(value: number, digits = 4): number {
   return Number(value.toFixed(digits));
 }
 
-function getEndDate(market: GammaMarket): string | null {
-  const raw = market.endDateIso || market.endDate;
+export function getEndDate(market: GammaMarket): string | null {
+  // Prefer the full timestamp. endDateIso is often only YYYY-MM-DD and caused
+  // recurring 5-minute markets to be treated as expired at midnight.
+  const raw = market.endDate || market.endDateIso;
   if (typeof raw !== "string" || !raw) return null;
   const ts = Date.parse(raw);
   return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
