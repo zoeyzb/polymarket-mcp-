@@ -117,6 +117,18 @@ function buildCategoryStats(closed: Array<Record<string, unknown>>): WalletCateg
     );
 }
 
+function classifyTrade(trade: Record<string, unknown>) {
+  const categories = classifyMarketCategories({
+    question: String(trade.title || ""),
+    slug: String(trade.slug || "")
+  });
+  return {
+    ...trade,
+    intelligencePrimaryCategory: primaryMarketCategory(categories),
+    intelligenceCategories: categories
+  };
+}
+
 export function scoreWalletProfile(input: {
   leaderboard: Record<string, unknown>;
   stats: Record<string, unknown> | null;
@@ -134,6 +146,9 @@ export function scoreWalletProfile(input: {
   const leaderboardPnl = n(leaderboard.pnl);
   const leaderboardVolume = n(leaderboard.volume);
   const roi = leaderboardVolume > 0 ? leaderboardPnl / leaderboardVolume : null;
+  const economicPnl = n(allTime.economic_pnl);
+  const volumeUsdc = n(allTime.volume_usdc);
+  const economicRoi = volumeUsdc > 0 ? economicPnl / volumeUsdc : null;
 
   const profitable = closedPositions.filter(position =>
     n(position.realized_pnl ?? position.total_pnl) > 0
@@ -152,11 +167,13 @@ export function scoreWalletProfile(input: {
   const categoryStats = buildCategoryStats(closedPositions);
   const dominant = categoryStats[0] ?? null;
 
-  // Transparent, deliberately conservative components.
+  // Economic PnL is the primary profitability anchor. Leaderboard PnL is
+  // retained as a secondary signal because the two can diverge materially.
   const profitability = clamp(
     50 +
-    (roi === null ? 0 : Math.tanh(roi * 8) * 35) +
-    Math.tanh(leaderboardPnl / 250_000) * 15
+    (economicRoi === null ? 0 : Math.tanh(economicRoi * 20) * 32) +
+    Math.tanh(economicPnl / 500_000) * 13 +
+    (roi === null ? 0 : Math.tanh(roi * 5) * 5)
   );
 
   const distinctMarkets = new Set(
@@ -174,9 +191,13 @@ export function scoreWalletProfile(input: {
     Math.log10(Math.max(1, closedPositions.length + 1)) * 10
   );
 
+  // The closed-position sample can be selection-biased by the API ordering, so
+  // its win rate/profit factor receives less weight than the all-time economics.
   const consistency = clamp(
-    (winRate === null ? 35 : winRate * 70) +
-    (profitFactor === null ? 0 : Math.min(30, Math.log1p(profitFactor) * 12))
+    35 +
+    (economicPnl > 0 ? 25 : economicPnl < 0 ? -20 : 0) +
+    (winRate === null ? 0 : (winRate - 0.5) * 25) +
+    (profitFactor === null ? 0 : Math.min(15, Math.log1p(profitFactor) * 6))
   );
 
   const specialization = clamp(
@@ -209,7 +230,7 @@ export function scoreWalletProfile(input: {
   if (dominant && dominant.shareOfSample >= 0.5) flags.push("category_specialist");
   if (roi !== null && roi > 0.05) flags.push("high_leaderboard_roi");
   if (n(allTime.maker_rebate) > n(allTime.taker_rebate)) flags.push("maker_rebate_heavy");
-  if (leaderboardPnl > 0 && n(allTime.economic_pnl) < 0) {
+  if (leaderboardPnl > 0 && economicPnl < 0) {
     flags.push("leaderboard_vs_economic_pnl_divergence");
   }
 
@@ -227,7 +248,7 @@ export function scoreWalletProfile(input: {
     makerRebate: round(n(allTime.maker_rebate), 2),
     takerRebate: round(n(allTime.taker_rebate), 2),
     rewardIncome: round(n(allTime.reward_income), 2),
-    volumeUsdc: round(n(allTime.volume_usdc), 2),
+    volumeUsdc: round(volumeUsdc, 2),
     tradeCount,
     sampledClosedPositions: closedPositions.length,
     sampledProfitablePositions: profitable,
@@ -235,7 +256,7 @@ export function scoreWalletProfile(input: {
     sampledProfitFactor: profitFactor === null ? null : round(profitFactor, 4),
     dominantCategory: dominant?.category ?? null,
     categoryStats,
-    recentTrades,
+    recentTrades: recentTrades.map(classifyTrade),
     smartScore,
     scoreBreakdown: {
       profitability: round(profitability, 1),
