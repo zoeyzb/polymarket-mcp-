@@ -272,7 +272,7 @@ async function buildEventBasketOpportunities(
   allActive: GammaMarket[],
   now: number,
   cutoff: number,
-  allBooks: Map<string, NormalizedBook>,
+  allBooks: Map<string, NormalizedBook> | null,
   bufferBps: number
 ): Promise<EventBasketOpportunity[]> {
   const groups = new Map<string, { title: string | null; negRisk: boolean; augmented: boolean; markets: GammaMarket[] }>();
@@ -352,7 +352,11 @@ async function buildEventBasketOpportunities(
     const yesTokens = authoritativeGamma.map(yesTokenId);
     if (yesTokens.some((token): token is null => token === null)) continue;
     const tokenIds = yesTokens as string[];
-    const books = tokenIds.map(token => allBooks.get(token)).filter((book): book is NormalizedBook => Boolean(book));
+    const groupBooks = allBooks
+      ? tokenIds.map(token => allBooks.get(token)).filter((book): book is NormalizedBook => Boolean(book))
+      : [...(await getOrderBooks(tokenIds)).values()];
+    const byToken = new Map(groupBooks.map(book => [book.tokenId, book]));
+    const books = tokenIds.map(token => byToken.get(token)).filter((book): book is NormalizedBook => Boolean(book));
     if (books.length !== tokenIds.length) continue;
 
     const topAskTotal = books.reduce((sum, book) => sum + (book.bestAsk ?? 1), 0);
@@ -1113,14 +1117,36 @@ export async function scanMultiHorizon(options?: {
       n(market.liquidityNum ?? market.liquidity) >= minLiquidity
     );
 
-  const tokenIds = [...new Set(
-    all.flatMap(market => parseStringArray(market.clobTokenIds))
-  )];
-  const allBooks = await getOrderBooks(tokenIds);
+  const enrichedAll: ScanCandidate[] = [];
+  const marketChunkSize = Math.max(
+    25,
+    Math.min(500, Number(process.env.FULL_UNIVERSE_MARKET_CHUNK_SIZE || 150))
+  );
 
-  const enrichedAll = (await Promise.all(
-    all.map(market => enrichMarket(market, now, true, allBooks, bufferBps))
-  )).filter((candidate): candidate is ScanCandidate => candidate !== null);
+  for (let i = 0; i < all.length; i += marketChunkSize) {
+    const marketChunk = all.slice(i, i + marketChunkSize);
+    const tokenIds = [...new Set(
+      marketChunk.flatMap(market => parseStringArray(market.clobTokenIds))
+    )];
+    const chunkBooks = await getOrderBooks(tokenIds);
+
+    const chunkCandidates = (await Promise.all(
+      marketChunk.map(market => enrichMarket(market, now, true, chunkBooks, bufferBps))
+    )).filter((candidate): candidate is ScanCandidate => candidate !== null);
+
+    for (const candidate of chunkCandidates) {
+      // Keep full books for near-term and structural candidates. For ordinary
+      // long-dated research markets, scoring is already complete, so dropping
+      // book payloads prevents full-universe scans from exhausting the Node heap.
+      if (
+        candidate.minutesRemaining > 1440 &&
+        candidate.opportunityClass === "research_candidate"
+      ) {
+        candidate.books = undefined;
+      }
+      enrichedAll.push(candidate);
+    }
+  }
 
   // Expensive behavioral/external enrichment is reserved for the <=24h research universe.
   // Structural execution math above still covers every active market.
@@ -1167,7 +1193,7 @@ export async function scanMultiHorizon(options?: {
     all,
     now,
     latestEndTs,
-    allBooks,
+    null,
     bufferBps
   );
 
