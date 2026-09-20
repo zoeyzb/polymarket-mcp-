@@ -1,6 +1,6 @@
-release=2026-09-20T01:33Z
-verified_head=d300caf99d066ad2d7af76a98f89776f21ca25c4
-tests=37
+release=2026-09-20T02:10Z
+verified_head=8c77c7f0613cbb78a483044b82b6a414101a4169
 typecheck=passed
+tests=passed
 build=passed
-features=wallet-intelligence,side-aware-smart-money,batched-wallet-persistence,maker-edge,cross-venue,resolution-intelligence,behavior-backtest,digital-fair-value,structural-graph,price-bucket-calibration,opportunity-packets
+features=gamma-keyset-full-universe,precise-5m-market-end-times,five-minute-market-classification,five-minute-ohlc-bars,chart-5m-api
