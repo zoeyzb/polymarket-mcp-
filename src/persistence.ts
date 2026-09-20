@@ -937,9 +937,10 @@ export async function persistWalletIntelligenceProfiles(
         const price = Number(trade.price);
         const title = String(trade.title || "");
         const slug = String(trade.slug || "");
-        const category = profile.categoryStats.find(stat =>
-          title.toLowerCase().includes(stat.category.replace("_", " "))
-        )?.category ?? profile.dominantCategory ?? "other";
+        const category =
+          String(trade.intelligencePrimaryCategory || "") ||
+          profile.dominantCategory ||
+          "other";
 
         const inserted = await client.query(
           `insert into polymarket_brain.wallet_trade_signals (
