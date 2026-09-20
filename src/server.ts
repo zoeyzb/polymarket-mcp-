@@ -25,6 +25,7 @@ import {
   cleanupRawStreams,
   compactRealtimeQuotes,
   getAlertStats,
+  getBehavioralShockBacktest,
   getCalibrationStats,
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
@@ -62,6 +63,7 @@ import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
 import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
+import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import type { NormalizedBook } from "./types.js";
 
@@ -701,6 +703,36 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.behavior_backtest",
+    {
+      description: "Measure empirical continuation versus reversion after large 5-minute Polymarket price shocks using this system's persisted 1-minute quote bars, split by category and 15/30/60-minute horizon.",
+      inputSchema: {
+        lookbackDays: z.number().int().min(1).max(90).default(14),
+        shockThresholdPct: z.number().min(0.5).max(50).default(10),
+        minSamples: z.number().int().min(1).max(1000).default(5)
+      }
+    },
+    async input => textResult(await getBehavioralShockBacktest(input))
+  );
+
+  server.registerTool(
+    "markets.digital_option_fair_value",
+    {
+      description: "Black-Scholes cash-or-nothing digital comparator for threshold markets. Returns a risk-neutral probability/value from user-supplied spot, strike, implied volatility, time, rates and dividends; it is not a real-world probability forecast.",
+      inputSchema: {
+        spot: z.number().positive(),
+        strike: z.number().positive(),
+        volatility: z.number().positive(),
+        timeYears: z.number().positive(),
+        riskFreeRate: z.number().default(0),
+        dividendYield: z.number().default(0),
+        direction: z.enum(["above", "below"]).default("above")
+      }
+    },
+    async input => textResult(priceCashOrNothingDigital(input))
+  );
+
+  server.registerTool(
     "wallets.top",
     {
       description: "Return persisted high-sample Polymarket wallet intelligence ranked by conservative smart-money score. This is a research signal, not a copy-trading recommendation.",
@@ -946,6 +978,15 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/behavior-backtest") {
+    json(res, 200, await getBehavioralShockBacktest({
+      lookbackDays: numberParam(url, "lookbackDays", 14, 1, 90),
+      shockThresholdPct: Number(url.searchParams.get("shockThresholdPct") || 10),
+      minSamples: numberParam(url, "minSamples", 5, 1, 1000)
+    }).catch(error => ({ error: errorMessage(error) })));
+    return true;
+  }
+
   if (url.pathname === "/api/wallets") {
     json(res, 200, {
       stats: await getWalletIntelligenceStats().catch(error => ({ error: errorMessage(error) })),
@@ -1072,6 +1113,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       mcpSelfTest: "/api/mcp-self-test",
       persistenceHealth: "/api/persistence-health",
       alerts: "/api/alerts?limit=100",
+      behaviorBacktest: "/api/behavior-backtest?lookbackDays=14&shockThresholdPct=10&minSamples=5",
       wallets: "/api/wallets?limit=50",
       crossVenue: "/api/cross-venue?limit=100",
       opportunityPackets: "/api/opportunity-packets?limit=100",
