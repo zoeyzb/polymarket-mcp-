@@ -47,6 +47,11 @@ import {
   getWorkerHeartbeats,
   getTopWalletIntelligence,
   getWalletIntelligenceStats,
+  getWalletControlStatus,
+  getWalletProfile,
+  getTradeControlStats,
+  listTradeIntents,
+  createTradeIntent,
   persistAlertsFromScan,
   persistOpportunityPackets,
   persistRealtimeQuotes,
@@ -67,6 +72,7 @@ import { sportsTracker } from "./sports.js";
 import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
+import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
 import type { NormalizedBook } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -735,6 +741,113 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "wallet.status",
+    {
+      description: "Return the configured non-custodial trading wallet profile, control flags, and public Polymarket portfolio. No seed phrase or private key is stored."
+    },
+    async () => {
+      const status = await getWalletControlStatus("primary");
+      const profile = await getWalletProfile("primary");
+      return textResult({
+        ...status,
+        portfolio: await getWalletPortfolio(profile)
+      });
+    }
+  );
+
+  server.registerTool(
+    "trading.preview_order",
+    {
+      description: "Preview a Polymarket limit or market order against the live CLOB without submitting it. Calculates visible-depth VWAP, slippage and pre-trade checks. Non-custodial and safe to use before wallet onboarding.",
+      inputSchema: {
+        tokenId: z.string().min(1),
+        side: z.enum(["BUY", "SELL"]),
+        orderType: z.enum(["LIMIT", "MARKET"]),
+        price: z.number().min(0.0001).max(0.9999).optional(),
+        size: z.number().positive().optional(),
+        amountUsdc: z.number().positive().optional(),
+        maxSlippageBps: z.number().int().min(0).max(5000).default(100)
+      }
+    },
+    async input => textResult(await previewTrade(input))
+  );
+
+  server.registerTool(
+    "trading.create_intent",
+    {
+      description: "Stage a validated Polymarket trade intent for the configured wallet. This does NOT submit an order. It remains AWAITING_SIGNATURE and requires the user's wallet signature. Disabled until wallet onboarding is explicitly enabled.",
+      inputSchema: {
+        conditionId: z.string().optional(),
+        tokenId: z.string().min(1),
+        marketSlug: z.string().optional(),
+        question: z.string().optional(),
+        outcome: z.string().optional(),
+        side: z.enum(["BUY", "SELL"]),
+        orderType: z.enum(["LIMIT", "MARKET"]),
+        tif: z.string().optional(),
+        price: z.number().min(0.0001).max(0.9999).optional(),
+        size: z.number().positive().optional(),
+        amountUsdc: z.number().positive().optional(),
+        maxSlippageBps: z.number().int().min(0).max(5000).default(100),
+        clientRequestId: z.string().optional()
+      }
+    },
+    async input => {
+      const preview = await previewTrade(input);
+      const criticalFailures = preview.checks.filter(
+        check => check.severity === "critical" && !check.ok
+      );
+      if (criticalFailures.length) {
+        return textResult({
+          ok: false,
+          reason: "pretrade_checks_failed",
+          preview,
+          criticalFailures
+        });
+      }
+
+      const intent = await createTradeIntent({
+        walletProfileId: "primary",
+        conditionId: input.conditionId ?? null,
+        tokenId: input.tokenId,
+        marketSlug: input.marketSlug ?? null,
+        question: input.question ?? null,
+        outcome: input.outcome ?? null,
+        side: input.side,
+        orderType: input.orderType,
+        tif: input.tif ?? null,
+        price: input.price ?? null,
+        size: input.size ?? null,
+        amountUsdc: input.amountUsdc ?? null,
+        maxSlippageBps: input.maxSlippageBps,
+        preview: preview as unknown as Record<string, unknown>,
+        clientRequestId: input.clientRequestId ?? null
+      });
+
+      return textResult({
+        ok: true,
+        intent,
+        signingRequired: true,
+        submitted: false
+      });
+    }
+  );
+
+  server.registerTool(
+    "trading.intents",
+    {
+      description: "List staged non-custodial trade intents and their signing/submission status.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).default(50)
+      }
+    },
+    async input => textResult({
+      stats: await getTradeControlStats(),
+      intents: await listTradeIntents(input.limit)
+    })
+  );
+
+  server.registerTool(
     "wallets.top",
     {
       description: "Return persisted high-sample Polymarket wallet intelligence ranked by conservative smart-money score. This is a research signal, not a copy-trading recommendation.",
@@ -931,7 +1044,9 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       status: "ok",
       service: "zoey-polymarket-mcp",
       version: VERSION,
-      mode: "read-only",
+      mode: "non-custodial-control-plane",
+      tradingEnabled: String(process.env.TRADING_ENABLED || "false").toLowerCase() === "true",
+      tradeIntentsEnabled: String(process.env.TRADING_INTENTS_ENABLED || "false").toLowerCase() === "true",
     serviceRole: SERVICE_ROLE,
       maxScannerWindowMinutes: 120,
       now: new Date().toISOString()
@@ -1028,7 +1143,8 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       stats: await getPersistentStats().catch(error => ({ error: errorMessage(error) })),
       streams: await getStreamPersistenceStats().catch(error => ({ error: errorMessage(error) })),
       realtimeTargets: await getRealtimeTargetStats().catch(error => ({ error: errorMessage(error) })),
-      maintenance: await getMaintenanceStats().catch(error => ({ error: errorMessage(error) }))
+      maintenance: await getMaintenanceStats().catch(error => ({ error: errorMessage(error) })),
+      trading: await getTradeControlStats().catch(error => ({ error: errorMessage(error) }))
     });
     return true;
   }
@@ -1054,6 +1170,17 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       shockThresholdPct: Number(url.searchParams.get("shockThresholdPct") || 10),
       minSamples: numberParam(url, "minSamples", 5, 1, 1000)
     }).catch(error => ({ error: errorMessage(error) })));
+    return true;
+  }
+
+  if (url.pathname === "/api/wallet-control") {
+    const status = await getWalletControlStatus("primary");
+    const profile = await getWalletProfile("primary");
+    json(res, 200, {
+      ...status,
+      portfolio: await getWalletPortfolio(profile),
+      stats: await getTradeControlStats()
+    });
     return true;
   }
 
@@ -1162,10 +1289,10 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     json(res, 200, {
       name: "Zoey Polymarket MCP",
       version: VERSION,
-      description: "Read-only Polymarket full-universe two-hour opportunity scanner with depth-aware CLOB execution math.",
+      description: "Polymarket full-universe intelligence and non-custodial trade-control MCP. Trade staging and submission are feature-gated; final order signing requires the configured user wallet.",
       transport: { type: "streamable-http", url: "/mcp" },
       capabilities: ["tools"],
-      readOnly: true
+      readOnly: false
     });
     return true;
   }
@@ -1174,7 +1301,9 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     json(res, 200, {
       name: "zoey-polymarket-mcp",
       version: VERSION,
-      mode: "read-only",
+      mode: "non-custodial-control-plane",
+      tradingEnabled: String(process.env.TRADING_ENABLED || "false").toLowerCase() === "true",
+      tradeIntentsEnabled: String(process.env.TRADING_INTENTS_ENABLED || "false").toLowerCase() === "true",
       mcp: "/mcp",
       health: "/health",
       opportunities: "/api/opportunities?minutes=120&limit=50",
@@ -1194,6 +1323,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       chart5m: "/api/chart-5m?tokenId=<token>&hours=24&limit=500",
       behaviorBacktest: "/api/behavior-backtest?lookbackDays=14&shockThresholdPct=10&minSamples=5",
       wallets: "/api/wallets?limit=50",
+      walletControl: "/api/wallet-control",
       crossVenue: "/api/cross-venue?limit=100",
       opportunityPackets: "/api/opportunity-packets?limit=100",
       calibration: "/api/calibration",
