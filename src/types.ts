@@ -212,4 +212,5 @@ export interface MultiHorizonScanResult {
     broader24h: MultiHorizonLane;
   };
   structuralUniverse: StructuralUniverseResult;
+  logicalViolations: import("./structural-graph.js").StructuralGraphViolation[];
 }
