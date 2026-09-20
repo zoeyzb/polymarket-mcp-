@@ -151,6 +151,10 @@ export interface ScanCandidate {
     highScoreWallets: number;
     totalNotionalUsd: number;
     weightedSmartMoneyScore: number;
+    yesDirectionalBias: number | null;
+    dominantSide: "YES" | "NO" | "MIXED" | null;
+    yesWeightedFlow: number;
+    noWeightedFlow: number;
     flags: string[];
   } | null;
   opportunityPacketScore?: number;
