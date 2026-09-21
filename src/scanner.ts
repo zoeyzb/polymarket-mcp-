@@ -23,6 +23,7 @@ import { estimateMakerEdge } from "./maker-edge.js";
 import { analyzeResolutionRules } from "./resolution-intelligence.js";
 import { listOpenKalshiMarkets, matchCandidateToKalshi } from "./cross-venue.js";
 import { findStructuralGraphViolations } from "./structural-graph.js";
+import { classifySportsMarketStructure } from "./sports-market-structure.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -526,6 +527,7 @@ async function enrichMarket(
 
   const categories = classifyMarketCategories(market, now);
   const primaryCategory = primaryMarketCategory(categories);
+  const sportsStructure = classifySportsMarketStructure(market);
 
   const candidate: ScanCandidate = {
     id: market.id ? String(market.id) : null,
@@ -550,6 +552,7 @@ async function enrichMarket(
     binaryArbitrage,
     categories,
     primaryCategory,
+    sportsStructure,
     opportunityClass: opportunity.opportunityClass,
     opportunityScore: opportunity.opportunityScore,
     rapidReviewScore: scoring.score,
@@ -558,6 +561,7 @@ async function enrichMarket(
       ...scoring.flags,
       ...(isPoliticalMarket(market) ? ["political_structural_only"] : []),
       ...(isFiveMinuteMarket ? ["five_minute_market"] : []),
+      ...(sportsStructure ? [`sports_market:${sportsStructure.kind}`] : []),
       ...(rawMinutesRemaining < 0 && market.acceptingOrders !== false
         ? ["scheduled_end_passed_orders_still_open"]
         : [])
