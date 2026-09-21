@@ -125,6 +125,7 @@ export interface ScanCandidate {
   categories: import("./category-taxonomy.js").MarketCategory[];
   primaryCategory: import("./category-taxonomy.js").MarketCategory;
   sportsStructure?: import("./sports-market-structure.js").SportsMarketStructure | null;
+  sportsRelations?: import("./sports-structural.js").SportsLineViolation[];
   opportunityClass: OpportunityClass;
   opportunityScore: number;
   attentionScore?: number;
@@ -223,4 +224,5 @@ export interface MultiHorizonScanResult {
   };
   structuralUniverse: StructuralUniverseResult;
   logicalViolations: import("./structural-graph.js").StructuralGraphViolation[];
+  sportsLineViolations?: import("./sports-structural.js").SportsLineViolation[];
 }
