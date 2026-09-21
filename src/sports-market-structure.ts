@@ -192,21 +192,16 @@ export function classifySportsMarketStructure(
   if (!sportsSignal) return null;
 
   const scope = detectScope(text, rawType);
-  const comparator = detectComparator(text);
-  const range = extractRange(text);
-  const line = extractLine(market, text);
+  const numericText = [question, s((market as any).groupItemTitle)].filter(Boolean).join(" ");
+  const comparator = detectComparator(numericText);
+  const range = extractRange(numericText);
+  const line = extractLine(market, numericText);
   const stat = detectStat(text);
 
   let kind: SportsMarketKind = "other_sports";
 
   if (/exact score|correct score|final score/i.test(text)) {
     kind = "exact_score";
-  } else if (
-    range.min !== null &&
-    (range.max !== null || /\d+\+/.test(text)) &&
-    /points?|goals?|runs?|score|total|kills?|rounds?/i.test(text)
-  ) {
-    kind = "score_band";
   } else if (/both teams.*score|btts/i.test(text)) {
     kind = "both_teams_score";
   } else if (/first (?:goal|touchdown|basket|score|scorer)|to score first/i.test(text)) {
@@ -217,19 +212,34 @@ export function classifySportsMarketStructure(
     kind = "team_total";
   } else if (
     rawType === "spreads" ||
-    rawType === "spread" ||
-    /\bspread\b|handicap/i.test(text)
+    rawType === "spread"
   ) {
     kind = scope === "full_game" || scope === "match" ? "spread" : "period_spread";
   } else if (
     rawType === "totals" ||
-    rawType === "total" ||
-    /\bover\/under\b|\btotal (?:points|goals|runs|rounds|games|sets)\b|\bover \d|\bunder \d/i.test(text)
+    rawType === "total"
   ) {
     kind = scope === "full_game" || scope === "match" ? "game_total" : "period_total";
   } else if (
     rawType === "moneyline" ||
-    rawType === "money_line" ||
+    rawType === "money_line"
+  ) {
+    kind = scope === "full_game" || scope === "match" ? "moneyline" : "period_moneyline";
+  } else if (
+    range.min !== null &&
+    (range.max !== null || /\d+\+/.test(numericText)) &&
+    /points?|goals?|runs?|score|total|kills?|rounds?/i.test(numericText)
+  ) {
+    kind = "score_band";
+  } else if (
+    /\bspread\b|handicap/i.test(text)
+  ) {
+    kind = scope === "full_game" || scope === "match" ? "spread" : "period_spread";
+  } else if (
+    /\bover\/under\b|\btotal (?:points|goals|runs|rounds|games|sets)\b|\bover \d|\bunder \d/i.test(text)
+  ) {
+    kind = scope === "full_game" || scope === "match" ? "game_total" : "period_total";
+  } else if (
     /\bmoneyline\b|\bmatch winner\b|\bgame winner\b/i.test(text)
   ) {
     kind = scope === "full_game" || scope === "match" ? "moneyline" : "period_moneyline";
