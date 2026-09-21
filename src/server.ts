@@ -74,6 +74,7 @@ import { inferFinalResolution } from "./resolutions.js";
 import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
+import { buildSportsBoard } from "./sports-board.js";
 import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
@@ -562,6 +563,31 @@ export function createMcpServer() {
           "Check the exact resolution wording and source before interpreting evidence.",
           "Compare fresh event evidence with current market pricing; do not infer certainty from market price alone."
         ]
+      });
+    }
+  );
+
+  server.registerTool(
+    "sports.board",
+    {
+      description: "Return the latest grouped sports board from the exhaustive scanner snapshot: live score/period plus moneyline, spread ladders, game totals, team totals, player props, exact-score and score-band markets.",
+      inputSchema: {
+        sport: z.string().optional(),
+        liveOnly: z.boolean().default(false)
+      }
+    },
+    async input => {
+      const snapshot = await getLatestMultiHorizonSnapshot();
+      const board = buildSportsBoard(snapshot as any);
+      const sportNeedle = input.sport?.trim().toUpperCase();
+      const games = (board.games || []).filter((game: any) =>
+        (!sportNeedle || String(game.sport || "").toUpperCase().includes(sportNeedle)) &&
+        (!input.liveOnly || game.liveState?.live === true)
+      );
+      return textResult({
+        ...board,
+        games,
+        filteredGameCount: games.length
       });
     }
   );
@@ -1261,6 +1287,23 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/sports-board") {
+    const snapshot = await getLatestMultiHorizonSnapshot();
+    const board = buildSportsBoard(snapshot as any);
+    const sportNeedle = (url.searchParams.get("sport") || "").trim().toUpperCase();
+    const liveOnly = (url.searchParams.get("liveOnly") || "false").toLowerCase() === "true";
+    const games = (board.games || []).filter((game: any) =>
+      (!sportNeedle || String(game.sport || "").toUpperCase().includes(sportNeedle)) &&
+      (!liveOnly || game.liveState?.live === true)
+    );
+    json(res, 200, {
+      ...board,
+      games,
+      filteredGameCount: games.length
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/wallet-control") {
     const status = await getWalletControlStatus("primary");
     const profile = await getWalletProfile("primary");
@@ -1420,6 +1463,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       behaviorBacktest: "/api/behavior-backtest?lookbackDays=14&shockThresholdPct=10&minSamples=5",
       wallets: "/api/wallets?limit=50",
       walletControl: "/api/wallet-control",
+      sportsBoard: "/api/sports-board?sport=NFL&liveOnly=false",
       crossVenue: "/api/cross-venue?limit=100",
       opportunityPackets: "/api/opportunity-packets?limit=100",
       calibration: "/api/calibration",
