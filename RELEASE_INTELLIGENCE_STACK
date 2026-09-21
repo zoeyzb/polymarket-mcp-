@@ -1,8 +1,6 @@
-release=2026-09-20T04:20Z
-verified_head=56b21f0326ce464774c2fe20490e7a51a6fe3d67
+release=2026-09-21T00:45Z
+verified_head=fdb137da2ee8e2a0362718a018486f4a90691b95
 typecheck=passed
 tests=passed
 build=passed
-features=scanner-snapshot-cache,narrow-urgent-scan,selective-clob-depth,negrisk-prefilter,streamed-gamma-pages,5m-markets,5m-charts,wallet-control-plane,cancel-all,cancel-order,cancel-market
-trading_enabled=false
-trade_intents_enabled=false
+features=sports-moneyline,sports-spreads,sports-totals,team-totals,player-props,period-markets,exact-score,score-bands,thresholds,live-scoreboard,sports-line-monotonicity,sports-board
