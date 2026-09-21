@@ -24,6 +24,7 @@ import { analyzeResolutionRules } from "./resolution-intelligence.js";
 import { listOpenKalshiMarkets, matchCandidateToKalshi } from "./cross-venue.js";
 import { findStructuralGraphViolations } from "./structural-graph.js";
 import { classifySportsMarketStructure } from "./sports-market-structure.js";
+import { findSportsLineViolations } from "./sports-structural.js";
 import type {
   CompleteSetExecution,
   ExecutionEstimate,
@@ -1320,6 +1321,40 @@ export async function scanMultiHorizon(options?: {
     bufferBps
   );
 
+  const sportsLineViolations = findSportsLineViolations(retained);
+  if (sportsLineViolations.length) {
+    const byCondition = new Map<string, typeof sportsLineViolations>();
+    for (const violation of sportsLineViolations) {
+      for (const conditionId of [
+        violation.easierConditionId,
+        violation.harderConditionId
+      ]) {
+        if (!conditionId) continue;
+        const existing = byCondition.get(conditionId) || [];
+        existing.push(violation);
+        byCondition.set(conditionId, existing);
+      }
+    }
+
+    for (const candidate of retained) {
+      if (!candidate.conditionId) continue;
+      const relations = byCondition.get(candidate.conditionId);
+      if (!relations?.length) continue;
+      candidate.sportsRelations = relations.slice(0, 10);
+      if (!candidate.flags.includes("sports_line_relative_value_candidate")) {
+        candidate.flags.push("sports_line_relative_value_candidate");
+      }
+      candidate.opportunityPacketScore = round(
+        Math.min(
+          100,
+          (candidate.opportunityPacketScore ?? candidate.discoveryScore ?? candidate.opportunityScore) +
+          Math.min(10, relations[0].violationProbabilityPoints * 0.35)
+        ),
+        1
+      );
+    }
+  }
+
   const logicalViolations = findStructuralGraphViolations(retained);
   if (logicalViolations.length) {
     const byCondition = new Map<string, typeof logicalViolations>();
@@ -1384,6 +1419,7 @@ export async function scanMultiHorizon(options?: {
           basket.flags.includes("top_book_complete_set_edge")
         ).length
     },
-    logicalViolations
+    logicalViolations,
+    sportsLineViolations
   };
 }
