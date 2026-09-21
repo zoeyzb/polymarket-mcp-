@@ -124,6 +124,7 @@ export interface ScanCandidate {
   } | null;
   categories: import("./category-taxonomy.js").MarketCategory[];
   primaryCategory: import("./category-taxonomy.js").MarketCategory;
+  sportsStructure?: import("./sports-market-structure.js").SportsMarketStructure | null;
   opportunityClass: OpportunityClass;
   opportunityScore: number;
   attentionScore?: number;
