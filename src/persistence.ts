@@ -1247,6 +1247,7 @@ export async function persistOpportunityPackets(
         smartMoney: candidate.smartMoney ?? null,
         crossVenue: candidate.crossVenue ?? [],
         logicalRelations: candidate.logicalRelations ?? [],
+        sportsStructure: candidate.sportsStructure ?? null,
         behavior: candidate.marketSignals ?? null,
         externalEvidence: candidate.externalEvidence ?? null,
         resolutionIntelligence: candidate.resolutionIntelligence ?? null,
