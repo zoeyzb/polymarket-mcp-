@@ -34,6 +34,13 @@ export interface CalibratedEdgeOptions {
   minFoldHitRatePct?: number;
   minHoldoutRoiPct?: number;
   feeMode?: "none" | "current_taker_schedule";
+  calendarLookbackDays?: number;
+  calendarFoldDays?: number;
+  calendarHoldoutDays?: number;
+  minFoldActiveDays?: number;
+  minFoldProfitableDayPct?: number;
+  minHoldoutActiveDays?: number;
+  minHoldoutProfitableDayPct?: number;
 }
 
 export interface BacktestSlice {
@@ -747,6 +754,228 @@ export function runWalkForwardEdgeBacktest(
       "The final holdout is untouched during policy selection.",
       "Current Polymarket taker fee schedule is applied conservatively to every replay trade when feeMode=current_taker_schedule.",
       "Historical stability reduces overfitting risk but cannot guarantee future profitability."
+    ]
+  };
+}
+
+export function runCalendarWalkForwardEdgeBacktest(
+  rawSamples: HistoricalReplaySample[],
+  options: CalibratedEdgeOptions
+) {
+  const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
+  const feeMode = options.feeMode ?? "current_taker_schedule";
+  const binSize = Math.max(0.01, Math.min(0.2, Number(options.binSize ?? 0.05)));
+  const minBinSamples = Math.max(5, Math.min(500, Number(options.minBinSamples ?? 20)));
+  const minFoldTrades = Math.max(5, Math.min(2000, Number(options.minFoldTrades ?? 30)));
+  const minFoldRoiPct = Math.max(0, Math.min(100, Number(options.minFoldRoiPct ?? 0.25)));
+  const minFoldHitRatePct = Math.max(0, Math.min(100, Number(options.minFoldHitRatePct ?? 95)));
+  const minHoldoutTrades = Math.max(10, Math.min(5000, Number(options.minHoldoutTrades ?? 100)));
+  const minHoldoutRoiPct = Math.max(0, Math.min(100, Number(options.minHoldoutRoiPct ?? 0.25)));
+  const minValidationHitRatePct = Math.max(0, Math.min(100, Number(options.minValidationHitRatePct ?? 95)));
+  const lookbackDays = Math.max(60, Math.min(730, Number(options.calendarLookbackDays ?? 180)));
+  const foldDays = Math.max(7, Math.min(90, Number(options.calendarFoldDays ?? 30)));
+  const holdoutDays = Math.max(7, Math.min(90, Number(options.calendarHoldoutDays ?? 30)));
+  const minFoldActiveDays = Math.max(1, Math.min(60, Number(options.minFoldActiveDays ?? 5)));
+  const minFoldProfitableDayPct = Math.max(0, Math.min(100, Number(options.minFoldProfitableDayPct ?? 80)));
+  const minHoldoutActiveDays = Math.max(1, Math.min(90, Number(options.minHoldoutActiveDays ?? 10)));
+  const minHoldoutProfitableDayPct = Math.max(0, Math.min(100, Number(options.minHoldoutProfitableDayPct ?? 90)));
+  const thresholds = (options.thresholds?.length ? options.thresholds : [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95])
+    .map(v => Math.max(0.5, Math.min(0.999, Number(v))))
+    .filter(Number.isFinite);
+  const minEdgesBps = (options.minEdgesBps?.length ? options.minEdgesBps : [0,25,50,100,150,200,300])
+    .map(v => Math.max(0, Math.min(5000, Number(v))))
+    .filter(Number.isFinite);
+  const allowedDomains = options.domains?.length ? new Set(options.domains) : null;
+
+  const eligible = rawSamples
+    .filter(sample =>
+      Boolean(sample.conditionId) &&
+      Number.isFinite(Date.parse(sample.resolvedAt)) &&
+      (!allowedDomains || allowedDomains.has(sample.domain)) &&
+      Number.isFinite(Number(sample.prices?.[options.horizon]))
+    )
+    .sort((a,b)=>Date.parse(a.resolvedAt)-Date.parse(b.resolvedAt));
+
+  if (eligible.length < 100) {
+    return {
+      generatedAt:new Date().toISOString(),
+      horizon:options.horizon,
+      eligibleSamples:eligible.length,
+      selectedPolicy:null,
+      folds:[],
+      holdout:null,
+      holdoutDaily:null,
+      deployable:false,
+      reason:"insufficient_samples"
+    };
+  }
+
+  const latestTs = Date.parse(eligible[eligible.length-1].resolvedAt);
+  const dayMs = 86_400_000;
+  const holdoutStartTs = latestTs - holdoutDays * dayMs;
+  const validationStartTs = holdoutStartTs - lookbackDays * dayMs;
+  const foldCount = Math.max(2, Math.floor(lookbackDays / foldDays));
+  const candidateResults:Array<{
+    threshold:number;
+    minEdgeBps:number;
+    folds:Array<BacktestSlice & { daily: DailyPnlSummary }>;
+    minRoi:number;
+    avgRoi:number;
+    totalTrades:number;
+    score:number;
+  }> = [];
+
+  for (const threshold of thresholds) {
+    for (const minEdgeBps of minEdgesBps) {
+      const folds:Array<BacktestSlice & { daily: DailyPnlSummary }> = [];
+      let valid = true;
+
+      for (let fold=0; fold<foldCount; fold++) {
+        const foldStartTs = validationStartTs + fold * foldDays * dayMs;
+        const foldEndTs = Math.min(holdoutStartTs, foldStartTs + foldDays * dayMs);
+        if (foldEndTs <= foldStartTs) continue;
+
+        const trainingSamples = eligible.filter(s => Date.parse(s.resolvedAt) < foldStartTs);
+        const foldSamples = eligible.filter(s => {
+          const ts=Date.parse(s.resolvedAt);
+          return ts >= foldStartTs && ts < foldEndTs;
+        });
+
+        if (trainingSamples.length < minBinSamples || foldSamples.length === 0) {
+          valid=false;
+          break;
+        }
+
+        const calibration = buildCalibration(trainingSamples, options.horizon, threshold, binSize, minBinSamples);
+        const slice = evaluateCalibrated(foldSamples, calibration, {
+          horizon:options.horizon,
+          threshold,
+          minEdgeBps,
+          bufferBps,
+          binSize,
+          feeMode
+        });
+        const daily = dailyCalibratedSummary(foldSamples, calibration, {
+          horizon:options.horizon,
+          threshold,
+          minEdgeBps,
+          bufferBps,
+          binSize,
+          feeMode
+        });
+        folds.push({...slice,daily});
+
+        if (
+          slice.trades < minFoldTrades ||
+          slice.roiPct === null ||
+          slice.roiPct < minFoldRoiPct ||
+          slice.hitRatePct === null ||
+          slice.hitRatePct < minFoldHitRatePct ||
+          daily.activeDays < minFoldActiveDays ||
+          daily.profitableDayPct === null ||
+          daily.profitableDayPct < minFoldProfitableDayPct
+        ) {
+          valid=false;
+          break;
+        }
+      }
+
+      if (!valid || folds.length !== foldCount) continue;
+      const rois=folds.map(f=>Number(f.roiPct||0));
+      const minRoi=Math.min(...rois);
+      const avgRoi=rois.reduce((a,b)=>a+b,0)/rois.length;
+      const totalTrades=folds.reduce((s,f)=>s+f.trades,0);
+      const score=minRoi*Math.sqrt(totalTrades)+avgRoi;
+      candidateResults.push({threshold,minEdgeBps,folds,minRoi,avgRoi,totalTrades,score});
+    }
+  }
+
+  candidateResults.sort((a,b)=>b.score-a.score);
+  const selected=candidateResults[0]||null;
+
+  if (!selected) {
+    return {
+      generatedAt:new Date().toISOString(),
+      horizon:options.horizon,
+      eligibleSamples:eligible.length,
+      selectedPolicy:null,
+      folds:[],
+      holdout:null,
+      holdoutDaily:null,
+      deployable:false,
+      reason:"no_policy_passed_calendar_walk_forward",
+      requirements:{
+        lookbackDays,foldDays,holdoutDays,foldCount,minFoldTrades,minFoldRoiPct,minFoldHitRatePct,
+        minFoldActiveDays,minFoldProfitableDayPct,minHoldoutTrades,minHoldoutRoiPct,
+        minHoldoutActiveDays,minHoldoutProfitableDayPct
+      }
+    };
+  }
+
+  const preHoldout=eligible.filter(s=>Date.parse(s.resolvedAt)<holdoutStartTs);
+  const holdoutSamples=eligible.filter(s=>Date.parse(s.resolvedAt)>=holdoutStartTs);
+  const finalCalibration=buildCalibration(preHoldout,options.horizon,selected.threshold,binSize,minBinSamples);
+  const holdout=evaluateCalibrated(holdoutSamples,finalCalibration,{
+    horizon:options.horizon,
+    threshold:selected.threshold,
+    minEdgeBps:selected.minEdgeBps,
+    bufferBps,
+    binSize,
+    feeMode
+  });
+  const holdoutDaily=dailyCalibratedSummary(holdoutSamples,finalCalibration,{
+    horizon:options.horizon,
+    threshold:selected.threshold,
+    minEdgeBps:selected.minEdgeBps,
+    bufferBps,
+    binSize,
+    feeMode
+  });
+
+  const deployable =
+    holdout.trades >= minHoldoutTrades &&
+    holdout.roiPct !== null &&
+    holdout.roiPct >= minHoldoutRoiPct &&
+    holdout.hitRatePct !== null &&
+    holdout.hitRatePct >= minValidationHitRatePct &&
+    holdoutDaily.activeDays >= minHoldoutActiveDays &&
+    holdoutDaily.profitableDayPct !== null &&
+    holdoutDaily.profitableDayPct >= minHoldoutProfitableDayPct;
+
+  return {
+    generatedAt:new Date().toISOString(),
+    horizon:options.horizon,
+    eligibleSamples:eligible.length,
+    selectedPolicy:{
+      threshold:selected.threshold,
+      minEdgeBps:selected.minEdgeBps,
+      bufferBps,
+      binSize,
+      feeMode,
+      minBinSamples
+    },
+    folds:selected.folds,
+    foldSummary:{
+      minRoiPct:round(selected.minRoi,3),
+      avgRoiPct:round(selected.avgRoi,3),
+      totalTrades:selected.totalTrades,
+      foldCount
+    },
+    holdout,
+    holdoutDaily,
+    deployable,
+    reason:deployable ? "calendar_walk_forward_and_daily_gate_pass" : "calendar_holdout_or_daily_gate_failed",
+    requirements:{
+      lookbackDays,foldDays,holdoutDays,foldCount,minFoldTrades,minFoldRoiPct,minFoldHitRatePct,
+      minFoldActiveDays,minFoldProfitableDayPct,minHoldoutTrades,minHoldoutRoiPct,
+      minHoldoutActiveDays,minHoldoutProfitableDayPct
+    },
+    assumptions:[
+      "Validation uses fixed calendar windows over the recent lookback rather than equal sample-count slices.",
+      "Every calendar fold must clear ROI, hit-rate, trade-count, active-day, and profitable-day floors.",
+      "The final holdout is the most recent fixed calendar window and is not used for policy selection.",
+      "Current Polymarket taker fees and the configured execution buffer are included.",
+      "Historical performance does not guarantee future profitability."
     ]
   };
 }
