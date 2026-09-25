@@ -8,6 +8,7 @@ describe("dashboard", () => {
     expect(html).toContain("Historical Replay");
     expect(html).toContain("Connect Wallet");
     expect(html).toContain("Ask GPT");
+    expect(html).toContain("Control token");
     expect(html).not.toContain("OPENAI_API_KEY");
   });
 });
