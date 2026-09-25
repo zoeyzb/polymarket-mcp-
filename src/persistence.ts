@@ -5,6 +5,7 @@ import type { SportsFeedEvent } from "./sports.js";
 import type { HistoricalCalibrationSample } from "./historical-calibration.js";
 import { isPoliticalCandidate } from "./domain-policy.js";
 import type { WalletIntelligenceProfile } from "./wallet-intelligence.js";
+import { compactCandidatePersistencePayload, compactScanPersistencePayload } from "./persistence-payload.js";
 
 const { Pool } = pg;
 
@@ -97,7 +98,7 @@ export async function persistScan(scan: ScanResult) {
         scan.scanDurationMs ?? null,
         executableCount,
         topOpportunityScore,
-        JSON.stringify(scan),
+        JSON.stringify(compactScanPersistencePayload(scan)),
         WRITER_ID
       ]
     );
@@ -135,7 +136,7 @@ export async function persistScan(scan: ScanResult) {
           JSON.stringify(candidate.flags || []),
           JSON.stringify(candidate.marketSignals?.priceRegime ?? null),
           JSON.stringify(candidate.marketSignals?.tradeFlow ?? null),
-          JSON.stringify(candidate)
+          JSON.stringify(compactCandidatePersistencePayload(candidate))
         ]
       );
     }
