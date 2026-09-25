@@ -124,7 +124,7 @@ export function classifyMarketCategories(
 
 export function primaryMarketCategory(categories: MarketCategory[]): MarketCategory {
   const priority: MarketCategory[] = [
-    "elections","politics","nba","basketball","soccer","games_esports","sports",
+    "nba","basketball","soccer","games_esports","sports","elections","politics",
     "crypto","earnings","fed_rates","economy","finance","geopolitics","weather",
     "science_climate","tech","movies","culture","business","mentions","five_minute","weekly",
     "recurring","new_listing","trending","ending_soon","world","other"
