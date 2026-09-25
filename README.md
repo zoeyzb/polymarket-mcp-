@@ -1,8 +1,8 @@
 # Polymarket MCP
 
-Current production architecture: **v0.4 intelligence engine**.
+Current production architecture: **v0.5 intelligence engine**.
 
-A read-only Railway-hosted MCP server that scans **all active Polymarket markets resolving within at most two hours** and ranks short-dated market-structure opportunities.
+A Railway-hosted Polymarket intelligence control plane that scans **≤2h, ≤6h, ≤24h, and structural/NegRisk opportunities across the active universe**, persists live evidence, runs historical replay on resolved non-political markets, exposes a clean dashboard, and keeps wallet execution non-custodial.
 
 ## What changed in v0.2
 
@@ -113,3 +113,47 @@ Additional operational endpoints:
 - `GET /api/calibration`
 - `GET /api/resolution-history`
 - `GET /api/realtime-health`
+
+
+## v0.5 replay + dashboard
+
+- Unified opportunity objects across urgent, developing, 24-hour, and structural lanes.
+- Strategy registry for complete-set, logical-relative-value, sports-line, maker, cross-venue, behavioral, and research signals.
+- Chronological train/holdout historical replay using resolved non-political binary markets across sports, crypto, weather, and other categories.
+- Configurable rolling historical backfill targeting up to three years by default.
+- Replay reports hit rate **and** ROI, maximum drawdown, sample counts, and an execution haircut. A high win rate is not treated as sufficient evidence of profitability.
+- Live dashboard at `/dashboard` with opportunities, replay metrics, deep service health, public-address wallet connection, and optional GPT research chat.
+- Optional GPT analysis uses `OPENAI_API_KEY` only on the server. The key is never sent to the browser.
+- Wallet connection stores only a public EVM address. The dashboard wallet/GPT mutation endpoints require a server-side `DASHBOARD_CONTROL_TOKEN`; changing the address automatically disables the wallet profile until it is deliberately re-enabled. Existing live-trading feature gates and wallet-signature requirements remain unchanged.
+
+### New MCP tools
+
+- `markets.unified_opportunities`
+- `markets.historical_replay`
+
+### New HTTP endpoints
+
+- `GET /dashboard`
+- `GET /health/deep`
+- `GET /api/unified-opportunities?lane=urgent_2h&limit=50`
+- `GET /api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75`
+- `POST /api/wallet/connect`
+- `POST /api/gpt`
+
+### Historical replay limits
+
+Historical replay is a **backtest**, not model training in the sense of fine-tuning GPT. It repeatedly evaluates fixed strategy rules against historical resolved markets and keeps chronological holdout data separate to reduce look-ahead bias. Exact historical execution cannot be reconstructed from settlement prices alone, so results use a configurable execution buffer and should be treated as diagnostic rather than a promise of future returns.
+
+### Recommended Railway history settings
+
+```
+HISTORICAL_LOOKBACK_HOURS=26280
+HISTORICAL_BACKFILL_WINDOW_DAYS=30
+HISTORICAL_BACKFILL_LIMIT=500
+HISTORICAL_BACKFILL_RUN_MINUTES=25
+HISTORICAL_BACKFILL_SECONDS=300
+DASHBOARD_CONTROL_TOKEN=<strong random secret>
+OPENAI_MODEL=gpt-5.6
+```
+
+`OPENAI_API_KEY` is optional and only required for the dashboard GPT chat. Keep both secrets in Railway variables; never embed either value in browser code.

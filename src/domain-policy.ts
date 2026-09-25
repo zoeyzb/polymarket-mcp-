@@ -20,7 +20,7 @@ export function isPoliticalMarket(market: GammaMarket): boolean {
     event.description
   ].map(text).join(" ");
 
-  return /\b(election|electoral|vote|voting|ballot|referendum|president|presidential|prime minister|parliament|parliamentary|congress|congressional|senate|senator|house of representatives|governor|gubernatorial|mayor|mayoral|state duma|bundestag|abgeordnetenhaus|legislative election|political party|party win|seats? in the|win the most seats|win between [0-9]+ and [0-9]+ seats|candidate)\b/i.test(haystack);
+  return /\b(politics|political|election|electoral|vote|voting|ballot|referendum|president|presidential|prime minister|parliament|parliamentary|congress|congressional|senate|senator|house of representatives|governor|gubernatorial|mayor|mayoral|state duma|bundestag|abgeordnetenhaus|legislative election|legislation|legislative|bill passes|executive order|government shutdown|federal reserve|fed decision|white house|supreme court|political party|party win|seats? in the|win the most seats|win between [0-9]+ and [0-9]+ seats|candidate)\b/i.test(haystack);
 }
 
 export function isPoliticalCandidate(candidate: ScanCandidate): boolean {

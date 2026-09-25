@@ -149,4 +149,10 @@ describe("historical calibration domain classification", () => {
       question: "Will Party A win the election?"
     })).toBeNull();
   });
+
+  it("admits generic non-political binary markets as other history", () => {
+    expect(classifyHistoricalDomain({
+      question: "Will the new console launch before December?"
+    })).toBe("other");
+  });
 });

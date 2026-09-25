@@ -1,7 +1,8 @@
 import type { GammaMarket } from "./types.js";
 import { getPriceHistoryRange, parseNumberArray, parseStringArray } from "./polymarket.js";
+import { isPoliticalMarket } from "./domain-policy.js";
 
-export type HistoricalDomain = "sports" | "crypto" | "weather";
+export type HistoricalDomain = "sports" | "crypto" | "weather" | "other";
 
 export interface HistoricalCalibrationSample {
   conditionId: string;
@@ -31,6 +32,8 @@ function textField(value: unknown) {
 }
 
 export function classifyHistoricalDomain(market: GammaMarket): HistoricalDomain | null {
+  if (isPoliticalMarket(market)) return null;
+
   const question = textField(market.question).toLowerCase();
   const slug = textField(market.slug).toLowerCase();
   const category = textField(market.category).toLowerCase();
@@ -62,7 +65,7 @@ export function classifyHistoricalDomain(market: GammaMarket): HistoricalDomain 
     return "weather";
   }
 
-  return null;
+  return "other";
 }
 
 function parseResolvedAt(market: GammaMarket): string | null {

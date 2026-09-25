@@ -2,10 +2,6 @@ name: Generate npm lockfile
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - package.json
-      - .github/workflows/generate-lockfile.yml
 
 permissions:
   contents: write

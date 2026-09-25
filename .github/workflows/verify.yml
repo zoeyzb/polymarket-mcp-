@@ -8,10 +8,16 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/verify.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/verify.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -24,57 +30,6 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm ci
-      - name: Typecheck
-        id: typecheck
-        shell: bash
-        run: |
-          set +e
-          npm run typecheck > typecheck.log 2>&1
-          code=$?
-          cat typecheck.log
-          if [ "$code" -ne 0 ]; then
-            echo "failed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "failed=false" >> "$GITHUB_OUTPUT"
-          fi
-          exit 0
-      - name: Publish typecheck diagnostics
-        if: steps.typecheck.outputs.failed == 'true'
-        shell: bash
-        run: |
-          cp typecheck.log TYPECHECK_LOG.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add TYPECHECK_LOG.txt
-          git commit -m "ci: capture typecheck diagnostics"
-          git push origin HEAD:main
-          exit 1
-      - name: Tests
-        id: tests
-        if: steps.typecheck.outputs.failed != 'true'
-        shell: bash
-        run: |
-          set +e
-          npm test -- --run > test.log 2>&1
-          code=$?
-          cat test.log
-          if [ "$code" -ne 0 ]; then
-            echo "failed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "failed=false" >> "$GITHUB_OUTPUT"
-          fi
-          exit 0
-      - name: Publish test diagnostics
-        if: steps.typecheck.outputs.failed != 'true' && steps.tests.outputs.failed == 'true'
-        shell: bash
-        run: |
-          cp test.log TEST_LOG.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add TEST_LOG.txt
-          git commit -m "ci: capture test diagnostics"
-          git push origin HEAD:main
-          exit 1
-      - name: Build
-        if: steps.typecheck.outputs.failed != 'true' && steps.tests.outputs.failed != 'true'
-        run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
