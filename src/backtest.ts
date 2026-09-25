@@ -12,6 +12,7 @@ export interface BacktestOptions {
   trainFraction?: number;
   bufferBps?: number;
   domains?: string[];
+  feeMode?: "none" | "current_taker_schedule";
 }
 
 export interface CalibratedEdgeOptions {
@@ -32,6 +33,7 @@ export interface CalibratedEdgeOptions {
   minFoldRoiPct?: number;
   minFoldHitRatePct?: number;
   minHoldoutRoiPct?: number;
+  feeMode?: "none" | "current_taker_schedule";
 }
 
 export interface BacktestSlice {
@@ -43,6 +45,8 @@ export interface BacktestSlice {
   totalPnlPerDollarStake: number;
   roiPct: number | null;
   maxDrawdownPerDollarStake: number;
+  totalFeesPerDollarStake?: number;
+  avgFeePerTrade?: number | null;
   startAt: string | null;
   endAt: string | null;
 }
@@ -71,6 +75,7 @@ export interface ProbabilityThresholdBacktest {
   threshold: number;
   bufferBps: number;
   trainFraction: number;
+  feeMode: "none" | "current_taker_schedule";
   eligibleSamples: number;
   training: BacktestSlice;
   holdout: BacktestSlice;
@@ -87,6 +92,29 @@ function iso(value: string | null) {
   if (!value) return null;
   const ts = Date.parse(value);
   return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
+}
+
+function currentTakerFeeRate(domain: string) {
+  switch (String(domain || "other").toLowerCase()) {
+    case "crypto": return 0.07;
+    case "sports": return 0.05;
+    case "weather": return 0.05;
+    case "other": return 0.05;
+    case "political": return 0.04;
+    default: return 0.05;
+  }
+}
+
+function takerFeePerDollarStake(
+  sample: HistoricalReplaySample,
+  executionPrice: number,
+  feeMode: "none" | "current_taker_schedule"
+) {
+  if (feeMode === "none") return 0;
+  if (!(executionPrice > 0 && executionPrice < 1)) return 0;
+  const shares = 1 / executionPrice;
+  const fee = shares * currentTakerFeeRate(sample.domain) * executionPrice * (1 - executionPrice);
+  return Math.round(fee * 100000) / 100000;
 }
 
 function median(values: number[]) {
@@ -133,7 +161,8 @@ function dailyThresholdSummary(
   samples: HistoricalReplaySample[],
   horizon: string,
   threshold: number,
-  bufferBps: number
+  bufferBps: number,
+  feeMode: "none" | "current_taker_schedule"
 ): DailyPnlSummary {
   const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
   for (const sample of samples) {
@@ -145,7 +174,8 @@ function dailyThresholdSummary(
     const quotedPrice = chooseOutcome0 ? p0 : 1-p0;
     const executionPrice = Math.min(0.999999, quotedPrice + bufferBps/10_000);
     const didWin = chooseOutcome0 ? sample.actualOutcome0 === 1 : sample.actualOutcome0 === 0;
-    const net = didWin ? (1/executionPrice)-1 : -1;
+    const fee = takerFeePerDollarStake(sample, executionPrice, feeMode);
+    const net = (didWin ? (1/executionPrice)-1 : -1) - fee;
     const day = new Date(sample.resolvedAt).toISOString().slice(0,10);
     const row = byDay.get(day) || {day,pnl:0,trades:0};
     row.pnl += net;
@@ -155,7 +185,13 @@ function dailyThresholdSummary(
   return summarizeDailyRows([...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)));
 }
 
-function evaluate(samples: HistoricalReplaySample[], horizon: string, threshold: number, bufferBps: number): BacktestSlice {
+function evaluate(
+  samples: HistoricalReplaySample[],
+  horizon: string,
+  threshold: number,
+  bufferBps: number,
+  feeMode: "none" | "current_taker_schedule"
+): BacktestSlice {
   let trades = 0;
   let wins = 0;
   let losses = 0;
@@ -163,6 +199,7 @@ function evaluate(samples: HistoricalReplaySample[], horizon: string, threshold:
   let equity = 0;
   let peak = 0;
   let maxDrawdown = 0;
+  let totalFees = 0;
 
   for (const sample of samples) {
     const p0 = Number(sample.prices?.[horizon]);
@@ -179,8 +216,10 @@ function evaluate(samples: HistoricalReplaySample[], horizon: string, threshold:
     const didWin = chooseOutcome0 ? sample.actualOutcome0 === 1 : sample.actualOutcome0 === 0;
     const executionBuffer = bufferBps / 10_000;
     const executionPrice = Math.min(0.999999, quotedPrice + executionBuffer);
-    const net = didWin ? (1 / executionPrice) - 1 : -1;
+    const fee = takerFeePerDollarStake(sample, executionPrice, feeMode);
+    const net = (didWin ? (1 / executionPrice) - 1 : -1) - fee;
 
+    totalFees += fee;
     pnl += net;
     equity += net;
     peak = Math.max(peak, equity);
@@ -198,6 +237,8 @@ function evaluate(samples: HistoricalReplaySample[], horizon: string, threshold:
     totalPnlPerDollarStake: round(pnl, 6),
     roiPct: trades ? round((pnl / trades) * 100, 3) : null,
     maxDrawdownPerDollarStake: round(maxDrawdown, 6),
+    totalFeesPerDollarStake: round(totalFees, 6),
+    avgFeePerTrade: trades ? round(totalFees / trades, 6) : null,
     startAt: samples.length ? iso(samples[0].resolvedAt) : null,
     endAt: samples.length ? iso(samples[samples.length - 1].resolvedAt) : null
   };
@@ -210,6 +251,7 @@ export function runProbabilityThresholdBacktest(
   const threshold = Math.max(0.5, Math.min(0.999, Number(options.threshold)));
   const trainFraction = Math.max(0.1, Math.min(0.9, Number(options.trainFraction ?? 0.7)));
   const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
+  const feeMode = options.feeMode ?? "current_taker_schedule";
   const allowedDomains = options.domains?.length ? new Set(options.domains) : null;
 
   const eligible = rawSamples
@@ -234,13 +276,15 @@ export function runProbabilityThresholdBacktest(
     threshold,
     bufferBps,
     trainFraction,
+    feeMode,
     eligibleSamples: eligible.length,
-    training: evaluate(trainingSamples, options.horizon, threshold, bufferBps),
-    holdout: evaluate(holdoutSamples, options.horizon, threshold, bufferBps),
-    holdoutDaily: dailyThresholdSummary(holdoutSamples, options.horizon, threshold, bufferBps),
+    training: evaluate(trainingSamples, options.horizon, threshold, bufferBps, feeMode),
+    holdout: evaluate(holdoutSamples, options.horizon, threshold, bufferBps, feeMode),
+    holdoutDaily: dailyThresholdSummary(holdoutSamples, options.horizon, threshold, bufferBps, feeMode),
     assumptions: [
       "Each replay trade risks one dollar at the historical implied probability.",
-      "Execution buffer is applied as adverse price movement before payout math; it is still not a reconstruction of historical queue position, fees, or slippage.",
+      "Execution buffer is applied as adverse price movement before payout math.",
+      "Current Polymarket taker fee schedule is applied conservatively to every replay trade when feeMode=current_taker_schedule; historical per-market fee activation is not reconstructed.",
       "Train and holdout are split chronologically to reduce look-ahead bias.",
       "Historical performance does not guarantee future results."
     ]
@@ -340,6 +384,7 @@ function dailyCalibratedSummary(
     minEdgeBps: number;
     bufferBps: number;
     binSize: number;
+    feeMode: "none" | "current_taker_schedule";
   }
 ): DailyPnlSummary {
   const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
@@ -354,7 +399,8 @@ function dailyCalibratedSummary(
     const expectedEdge = calibrated.calibratedWinProbability - executionPrice;
     if (expectedEdge < options.minEdgeBps / 10_000) continue;
 
-    const net = trade.didWin ? (1 / executionPrice) - 1 : -1;
+    const fee = takerFeePerDollarStake(sample, executionPrice, options.feeMode);
+    const net = (trade.didWin ? (1 / executionPrice) - 1 : -1) - fee;
     const day = new Date(sample.resolvedAt).toISOString().slice(0,10);
     const row = byDay.get(day) || {day,pnl:0,trades:0};
     row.pnl += net;
@@ -374,6 +420,7 @@ function evaluateCalibrated(
     minEdgeBps: number;
     bufferBps: number;
     binSize: number;
+    feeMode: "none" | "current_taker_schedule";
   }
 ): BacktestSlice {
   let trades = 0;
@@ -383,6 +430,7 @@ function evaluateCalibrated(
   let equity = 0;
   let peak = 0;
   let maxDrawdown = 0;
+  let totalFees = 0;
 
   for (const sample of samples) {
     const trade = prepareTrade(sample, options.horizon, options.threshold);
@@ -395,7 +443,9 @@ function evaluateCalibrated(
     if (expectedEdge < options.minEdgeBps / 10_000) continue;
 
     trades += 1;
-    const net = trade.didWin ? (1 / executionPrice) - 1 : -1;
+    const fee = takerFeePerDollarStake(sample, executionPrice, options.feeMode);
+    const net = (trade.didWin ? (1 / executionPrice) - 1 : -1) - fee;
+    totalFees += fee;
     pnl += net;
     equity += net;
     peak = Math.max(peak, equity);
@@ -413,6 +463,8 @@ function evaluateCalibrated(
     totalPnlPerDollarStake: round(pnl, 6),
     roiPct: trades ? round((pnl / trades) * 100, 3) : null,
     maxDrawdownPerDollarStake: round(maxDrawdown, 6),
+    totalFeesPerDollarStake: round(totalFees, 6),
+    avgFeePerTrade: trades ? round(totalFees / trades, 6) : null,
     startAt: samples.length ? iso(samples[0].resolvedAt) : null,
     endAt: samples.length ? iso(samples[samples.length - 1].resolvedAt) : null
   };
@@ -423,6 +475,7 @@ export function runWalkForwardEdgeBacktest(
   options: CalibratedEdgeOptions
 ) {
   const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
+  const feeMode = options.feeMode ?? "current_taker_schedule";
   const binSize = Math.max(0.01, Math.min(0.2, Number(options.binSize ?? 0.05)));
   const minBinSamples = Math.max(5, Math.min(500, Number(options.minBinSamples ?? 20)));
   const minValidationHitRatePct = Math.max(0, Math.min(100, Number(options.minValidationHitRatePct ?? 95)));
@@ -505,7 +558,8 @@ export function runWalkForwardEdgeBacktest(
           threshold,
           minEdgeBps,
           bufferBps,
-          binSize
+          binSize,
+          feeMode
         });
         folds.push(result);
 
@@ -567,14 +621,16 @@ export function runWalkForwardEdgeBacktest(
     threshold:selected.threshold,
     minEdgeBps:selected.minEdgeBps,
     bufferBps,
-    binSize
+    binSize,
+    feeMode
   });
   const holdoutDaily = dailyCalibratedSummary(holdoutSamples, finalCalibration, {
     horizon:options.horizon,
     threshold:selected.threshold,
     minEdgeBps:selected.minEdgeBps,
     bufferBps,
-    binSize
+    binSize,
+    feeMode
   });
 
   const deployable =
@@ -593,6 +649,7 @@ export function runWalkForwardEdgeBacktest(
       minEdgeBps:selected.minEdgeBps,
       bufferBps,
       binSize,
+      feeMode,
       minBinSamples,
       minHoldoutRoiPct,
       minHoldoutHitRatePct:minValidationHitRatePct
@@ -619,6 +676,7 @@ export function runWalkForwardEdgeBacktest(
       "Each validation fold is evaluated strictly after the data used to calibrate it.",
       "A policy is rejected if any walk-forward fold is below the configured ROI, hit-rate, or trade-count floor.",
       "The final holdout is untouched during policy selection.",
+      "Current Polymarket taker fee schedule is applied conservatively to every replay trade when feeMode=current_taker_schedule.",
       "Historical stability reduces overfitting risk but cannot guarantee future profitability."
     ]
   };
@@ -631,6 +689,7 @@ export function runCalibratedEdgeBacktest(
   const trainFraction = Math.max(0.3, Math.min(0.8, Number(options.trainFraction ?? 0.6)));
   const validationFraction = Math.max(0.1, Math.min(0.4, Number(options.validationFraction ?? 0.2)));
   const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
+  const feeMode = options.feeMode ?? "current_taker_schedule";
   const binSize = Math.max(0.01, Math.min(0.2, Number(options.binSize ?? 0.05)));
   const minBinSamples = Math.max(5, Math.min(500, Number(options.minBinSamples ?? 20)));
   const minValidationTrades = Math.max(5, Math.min(1000, Number(options.minValidationTrades ?? 40)));
@@ -685,7 +744,8 @@ export function runCalibratedEdgeBacktest(
         threshold,
         minEdgeBps,
         bufferBps,
-        binSize
+        binSize,
+        feeMode
       });
       if (
         validation.trades < minValidationTrades ||
@@ -727,14 +787,16 @@ export function runCalibratedEdgeBacktest(
     threshold: selected.threshold,
     minEdgeBps: selected.minEdgeBps,
     bufferBps,
-    binSize
+    binSize,
+    feeMode
   });
   const holdoutDaily = dailyCalibratedSummary(holdoutSamples, selected.calibration, {
     horizon: options.horizon,
     threshold: selected.threshold,
     minEdgeBps: selected.minEdgeBps,
     bufferBps,
-    binSize
+    binSize,
+    feeMode
   });
   const deployable =
     selected.validation.roiPct !== null &&
@@ -757,6 +819,7 @@ export function runCalibratedEdgeBacktest(
       minEdgeBps: selected.minEdgeBps,
       bufferBps,
       binSize,
+      feeMode,
       minBinSamples
     },
     validation: selected.validation,
@@ -769,6 +832,7 @@ export function runCalibratedEdgeBacktest(
       "A policy must have positive validation ROI, a minimum validation trade count, and the configured validation hit-rate floor before it is evaluated for deployment.",
       "Deployment gate additionally requires the configured untouched holdout ROI floor, holdout hit-rate floor, and minimum holdout trade count.",
       "Execution buffer is applied as adverse price movement before payout math.",
+      "Current Polymarket taker fee schedule is applied conservatively to every replay trade when feeMode=current_taker_schedule.",
       "Historical performance does not guarantee future results."
     ]
   };
