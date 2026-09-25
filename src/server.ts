@@ -82,7 +82,7 @@ import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./hi
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
-import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalendarWalkForwardEdgeBacktest, runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
 import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-object.js";
 import { renderDashboardHtml } from "./dashboard.js";
 import type { NormalizedBook, ScanCandidate } from "./types.js";
@@ -169,17 +169,27 @@ async function getProductionStrategyPolicy(force = false) {
   for (const [domain,replay] of replays) {
     totalSamples += Number(replay.sampleCount || 0);
     const walk = replay.walkForward as any;
+    const calendarWalk = replay.calendarWalkForward as any;
     const calibrated = replay.calibrated as any;
-    const enabled = walk?.deployable === true;
+    const enabled = calendarWalk?.deployable === true;
     perDomain[domain] = {
       enabled,
       sampleCount:replay.sampleCount,
-      reason:walk?.reason || "walk_forward_unavailable",
-      walkForward:{
+      reason:calendarWalk?.reason || "calendar_walk_forward_unavailable",
+      calendarWalkForward:{
         deployable:enabled,
+        selectedPolicy:calendarWalk?.selectedPolicy ?? null,
+        foldSummary:calendarWalk?.foldSummary ?? null,
+        holdout:calendarWalk?.holdout ?? null,
+        holdoutDaily:calendarWalk?.holdoutDaily ?? null,
+        requirements:calendarWalk?.requirements ?? null
+      },
+      sampleWalkForward:{
+        deployable:walk?.deployable === true,
         selectedPolicy:walk?.selectedPolicy ?? null,
         foldSummary:walk?.foldSummary ?? null,
         holdout:walk?.holdout ?? null,
+        holdoutDaily:walk?.holdoutDaily ?? null,
         requirements:walk?.requirements ?? null
       },
       calibratedResearch:{
@@ -325,6 +335,27 @@ async function runHistoricalReplay(options: {
       minFoldHitRatePct: 95,
       minHoldoutTrades: 100,
       minHoldoutRoiPct: 0.25
+    }),
+    calendarWalkForward: runCalendarWalkForwardEdgeBacktest(samples, {
+      horizon,
+      bufferBps: options.bufferBps ?? 50,
+      domains: options.domains,
+      thresholds: [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95],
+      minEdgesBps: [0,25,50,100,150,200,300],
+      minBinSamples: 20,
+      calendarLookbackDays: 180,
+      calendarFoldDays: 30,
+      calendarHoldoutDays: 30,
+      minFoldTrades: 30,
+      minFoldRoiPct: 0.25,
+      minFoldHitRatePct: 95,
+      minFoldActiveDays: 5,
+      minFoldProfitableDayPct: 80,
+      minHoldoutTrades: 100,
+      minHoldoutRoiPct: 0.25,
+      minValidationHitRatePct: 95,
+      minHoldoutActiveDays: 10,
+      minHoldoutProfitableDayPct: 90
     })
   };
 }
