@@ -2099,22 +2099,48 @@ async function runHistoricalBackfillWorker() {
     const budgetMs = HISTORICAL_BACKFILL_RUN_MINUTES * 60_000;
     const cutoff = new Date(Date.now() - HISTORICAL_LOOKBACK_HOURS * 3600_000);
     const summary = await getHistoricalCalibrationSummary().catch(() => null) as any;
+
+    if (summary?.firstResolvedAt) {
+      const earliestStored = Date.parse(summary.firstResolvedAt);
+      if (Number.isFinite(earliestStored) && earliestStored <= cutoff.getTime()) {
+        console.log(JSON.stringify({
+          level: "info",
+          message: "historical_calibration_backfill_complete",
+          firstResolvedAt: summary.firstResolvedAt,
+          targetCutoff: cutoff.toISOString(),
+          targetYears: Number((HISTORICAL_LOOKBACK_HOURS / (24 * 365)).toFixed(2)),
+          at: new Date().toISOString()
+        }));
+        return;
+      }
+    }
+
     let cursorEnd = summary?.firstResolvedAt
       ? new Date(Date.parse(summary.firstResolvedAt) - 1)
       : new Date();
-    if (!Number.isFinite(cursorEnd.getTime()) || cursorEnd < cutoff) cursorEnd = new Date();
+    if (!Number.isFinite(cursorEnd.getTime())) cursorEnd = new Date();
 
     let stored = 0;
     let skipped = 0;
     let windows = 0;
     let checked = 0;
+    let saturatedWindows = 0;
+    let windowDays = HISTORICAL_BACKFILL_WINDOW_DAYS;
 
     while (cursorEnd > cutoff && Date.now() - runStarted < budgetMs) {
       const cursorStart = new Date(Math.max(
         cutoff.getTime(),
-        cursorEnd.getTime() - HISTORICAL_BACKFILL_WINDOW_DAYS * 86_400_000
+        cursorEnd.getTime() - windowDays * 86_400_000
       ));
-      const closedMarkets = await listClosedMarketsEndingBetween(cursorStart, cursorEnd, 20, 100);
+
+      const closedMarkets = await listClosedMarketsEndingBetween(cursorStart, cursorEnd, 50, 100);
+
+      if (closedMarkets.length >= 5000 && windowDays > 1) {
+        saturatedWindows += 1;
+        windowDays = Math.max(1, Math.floor(windowDays / 2));
+        continue;
+      }
+
       checked += closedMarkets.length;
       const eligible = closedMarkets.filter(market =>
         Boolean(market.conditionId) && classifyHistoricalDomain(market) !== null
@@ -2140,7 +2166,7 @@ async function runHistoricalBackfillWorker() {
 
       windows += 1;
       cursorEnd = new Date(cursorStart.getTime() - 1);
-      if (closedMarkets.length >= 2000) break;
+      windowDays = HISTORICAL_BACKFILL_WINDOW_DAYS;
     }
 
     console.log(JSON.stringify({
@@ -2149,9 +2175,12 @@ async function runHistoricalBackfillWorker() {
       targetLookbackHours: HISTORICAL_LOOKBACK_HOURS,
       targetYears: Number((HISTORICAL_LOOKBACK_HOURS / (24 * 365)).toFixed(2)),
       windows,
+      saturatedWindows,
       checked,
       stored,
       skipped,
+      nextCursorEnd: cursorEnd.toISOString(),
+      targetCutoff: cutoff.toISOString(),
       runtimeSeconds: Number(((Date.now() - runStarted) / 1000).toFixed(1)),
       at: new Date().toISOString()
     }));
