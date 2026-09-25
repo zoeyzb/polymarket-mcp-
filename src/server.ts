@@ -945,17 +945,6 @@ export function createMcpServer() {
   );
 
   server.registerTool(
-    "wallet.connect",
-    {
-      description: "Store only the public EVM wallet address for the primary non-custodial profile. This never stores a private key and does not enable live trading.",
-      inputSchema: {
-        address: z.string().regex(/^0x[a-fA-F0-9]{40}$/)
-      }
-    },
-    async input => textResult(await upsertWalletProfileAddress(input.address))
-  );
-
-  server.registerTool(
     "wallet.status",
     {
       description: "Return the configured non-custodial trading wallet profile, control flags, and public Polymarket portfolio. No seed phrase or private key is stored."
