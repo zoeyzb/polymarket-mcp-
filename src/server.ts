@@ -38,6 +38,7 @@ import {
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getPersistenceIntegrity,
+  getStorageHealth,
   getPersistentStats,
   getRecentAlerts,
   getRecentCrossVenueMatches,
@@ -1386,6 +1387,11 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/storage-health") {
+    json(res, 200, await getStorageHealth());
+    return true;
+  }
+
   if (url.pathname === "/api/upstream-check") {
     json(res, 200, await upstreamCheck());
     return true;
@@ -1690,6 +1696,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       mcp: "/mcp",
       health: "/health",
       deepHealth: "/health/deep",
+      storageHealth: "/api/storage-health",
       dashboard: "/dashboard",
       unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
       historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
