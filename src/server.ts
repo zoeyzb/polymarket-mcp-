@@ -213,7 +213,7 @@ async function askOpenAI(prompt: string) {
         {
           role: "system",
           content:
-            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns."
+            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns. For political or election markets, remain strictly descriptive and structural-only: do not predict winners, rank candidates or parties, recommend positions, assess electability, or provide directional trading advice."
         },
         {
           role: "user",
@@ -229,6 +229,24 @@ async function askOpenAI(prompt: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function controlTokenAuthorized(req: IncomingMessage) {
+  const configured = String(process.env.DASHBOARD_CONTROL_TOKEN || "").trim();
+  if (!configured) return { ok: false as const, reason: "dashboard_control_token_not_configured" };
+  const auth = String(req.headers.authorization || "");
+  const supplied = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!supplied || supplied !== configured) return { ok: false as const, reason: "unauthorized" };
+  return { ok: true as const };
+}
+
+function requireControlToken(req: IncomingMessage, res: ServerResponse) {
+  const result = controlTokenAuthorized(req);
+  if (result.ok) return true;
+  json(res, result.reason === "dashboard_control_token_not_configured" ? 503 : 401, {
+    error: result.reason
+  });
+  return false;
 }
 
 async function runMcpSelfTest() {
@@ -920,7 +938,7 @@ export function createMcpServer() {
         threshold: z.number().min(0.5).max(0.999).default(0.75),
         trainFraction: z.number().min(0.1).max(0.9).default(0.7),
         bufferBps: z.number().min(0).max(5000).default(50),
-        domains: z.array(z.enum(["sports","crypto","weather"])).optional()
+        domains: z.array(z.enum(["sports","crypto","weather","other"])).optional()
       }
     },
     async input => textResult(await runHistoricalReplay(input))
@@ -1305,6 +1323,7 @@ function numberParam(url: URL, name: string, fallback: number, min: number, max:
 
 async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (req.method === "POST" && url.pathname === "/api/wallet/connect") {
+    if (!requireControlToken(req, res)) return true;
     const body = await parseBody(req) as any;
     const address = String(body?.address || "");
     if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -1316,6 +1335,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   }
 
   if (req.method === "POST" && url.pathname === "/api/gpt") {
+    if (!requireControlToken(req, res)) return true;
     const body = await parseBody(req) as any;
     const prompt = String(body?.prompt || "").trim();
     if (!prompt) json(res, 400, { error: "prompt_required" });
@@ -1619,7 +1639,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     const domains = (url.searchParams.get("domains") || "")
       .split(",")
       .map(value => value.trim())
-      .filter(value => ["sports","crypto","weather"].includes(value));
+      .filter(value => ["sports","crypto","weather","other"].includes(value));
     json(res, 200, await runHistoricalReplay({
       years: numberParam(url, "years", 3, 0.25, 10),
       horizon: url.searchParams.get("horizon") || "tMinus60m",
@@ -2203,7 +2223,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     message: "Polymarket MCP listening",
     version: VERSION,
     port: PORT,
-    mode: "read-only",
+    mode: "non-custodial-control-plane",
     serviceRole: SERVICE_ROLE,
     mcp: "/mcp",
     at: new Date().toISOString()
