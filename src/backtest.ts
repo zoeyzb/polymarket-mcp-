@@ -58,11 +58,23 @@ export interface DailyPnlSummary {
   flatDays: number;
   profitableDayPct: number | null;
   avgTradesPerActiveDay: number | null;
+  avgNetReturnPerTradePct: number | null;
+  peakConcurrentTrades: number;
   avgPnlPerDollarStakePerDay: number | null;
   medianPnlPerDollarStakePerDay: number | null;
   worstDayPnlPerDollarStake: number | null;
   bestDayPnlPerDollarStake: number | null;
   requiredDailyTurnoverUsd: {
+    target100: number | null;
+    target500: number | null;
+    target1000: number | null;
+  };
+  avgStakePerTradeUsd: {
+    target100: number | null;
+    target500: number | null;
+    target1000: number | null;
+  };
+  estimatedActiveBankrollUsd: {
     target100: number | null;
     target500: number | null;
     target1000: number | null;
@@ -117,6 +129,29 @@ function takerFeePerDollarStake(
   return Math.round(fee * 100000) / 100000;
 }
 
+function horizonMinutes(horizon: string) {
+  const match = /^tMinus(\d+)m$/i.exec(horizon);
+  return match ? Math.max(1, Number(match[1])) : 60;
+}
+
+function peakConcurrentTrades(resolvedAts: string[], horizon: string) {
+  const holdMs = horizonMinutes(horizon) * 60_000;
+  const events:Array<{ts:number;delta:number}> = [];
+  for (const resolvedAt of resolvedAts) {
+    const exit = Date.parse(resolvedAt);
+    if (!Number.isFinite(exit)) continue;
+    events.push({ts:exit-holdMs,delta:1},{ts:exit,delta:-1});
+  }
+  events.sort((a,b)=>a.ts-b.ts || a.delta-b.delta);
+  let current=0;
+  let peak=0;
+  for(const event of events){
+    current += event.delta;
+    peak = Math.max(peak,current);
+  }
+  return peak;
+}
+
 function median(values: number[]) {
   if (!values.length) return null;
   const sorted = [...values].sort((a,b)=>a-b);
@@ -124,7 +159,10 @@ function median(values: number[]) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
 }
 
-function summarizeDailyRows(rows: Array<{ day:string; pnl:number; trades:number }>): DailyPnlSummary {
+function summarizeDailyRows(
+  rows: Array<{ day:string; pnl:number; trades:number }>,
+  peakConcurrent: number
+): DailyPnlSummary {
   const activeDays = rows.length;
   const profitableDays = rows.filter(r=>r.pnl > 0).length;
   const losingDays = rows.filter(r=>r.pnl < 0).length;
@@ -133,10 +171,19 @@ function summarizeDailyRows(rows: Array<{ day:string; pnl:number; trades:number 
   const totalPnl = pnls.reduce((a,b)=>a+b,0);
   const avgPnl = activeDays ? totalPnl / activeDays : null;
   const avgTrades = activeDays ? rows.reduce((a,b)=>a+b.trades,0) / activeDays : null;
+  const avgReturnPerTrade = avgPnl && avgTrades ? avgPnl / avgTrades : null;
   const turnoverFor = (target:number) =>
-    avgPnl && avgPnl > 0 && avgTrades && avgTrades > 0
-      ? target / (avgPnl / avgTrades)
+    avgReturnPerTrade && avgReturnPerTrade > 0
+      ? target / avgReturnPerTrade
       : null;
+  const stakeFor = (target:number) => {
+    const turnover = turnoverFor(target);
+    return turnover !== null && avgTrades && avgTrades > 0 ? turnover / avgTrades : null;
+  };
+  const bankrollFor = (target:number) => {
+    const stake = stakeFor(target);
+    return stake !== null && peakConcurrent > 0 ? stake * peakConcurrent : null;
+  };
 
   return {
     activeDays,
@@ -145,6 +192,8 @@ function summarizeDailyRows(rows: Array<{ day:string; pnl:number; trades:number 
     flatDays,
     profitableDayPct: activeDays ? round((profitableDays / activeDays) * 100, 3) : null,
     avgTradesPerActiveDay: avgTrades === null ? null : round(avgTrades, 3),
+    avgNetReturnPerTradePct: avgReturnPerTrade === null ? null : round(avgReturnPerTrade * 100, 3),
+    peakConcurrentTrades: peakConcurrent,
     avgPnlPerDollarStakePerDay: avgPnl === null ? null : round(avgPnl, 6),
     medianPnlPerDollarStakePerDay: activeDays ? round(median(pnls) || 0, 6) : null,
     worstDayPnlPerDollarStake: activeDays ? round(Math.min(...pnls), 6) : null,
@@ -153,6 +202,16 @@ function summarizeDailyRows(rows: Array<{ day:string; pnl:number; trades:number 
       target100: turnoverFor(100) === null ? null : round(turnoverFor(100)!, 2),
       target500: turnoverFor(500) === null ? null : round(turnoverFor(500)!, 2),
       target1000: turnoverFor(1000) === null ? null : round(turnoverFor(1000)!, 2)
+    },
+    avgStakePerTradeUsd: {
+      target100: stakeFor(100) === null ? null : round(stakeFor(100)!, 2),
+      target500: stakeFor(500) === null ? null : round(stakeFor(500)!, 2),
+      target1000: stakeFor(1000) === null ? null : round(stakeFor(1000)!, 2)
+    },
+    estimatedActiveBankrollUsd: {
+      target100: bankrollFor(100) === null ? null : round(bankrollFor(100)!, 2),
+      target500: bankrollFor(500) === null ? null : round(bankrollFor(500)!, 2),
+      target1000: bankrollFor(1000) === null ? null : round(bankrollFor(1000)!, 2)
     }
   };
 }
@@ -165,6 +224,7 @@ function dailyThresholdSummary(
   feeMode: "none" | "current_taker_schedule"
 ): DailyPnlSummary {
   const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
+  const resolvedAts:string[] = [];
   for (const sample of samples) {
     const p0 = Number(sample.prices?.[horizon]);
     if (!Number.isFinite(p0) || p0 <= 0 || p0 >= 1) continue;
@@ -181,8 +241,12 @@ function dailyThresholdSummary(
     row.pnl += net;
     row.trades += 1;
     byDay.set(day,row);
+    resolvedAts.push(sample.resolvedAt);
   }
-  return summarizeDailyRows([...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)));
+  return summarizeDailyRows(
+    [...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)),
+    peakConcurrentTrades(resolvedAts,horizon)
+  );
 }
 
 function evaluate(
@@ -388,6 +452,7 @@ function dailyCalibratedSummary(
   }
 ): DailyPnlSummary {
   const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
+  const resolvedAts:string[] = [];
 
   for (const sample of samples) {
     const trade = prepareTrade(sample, options.horizon, options.threshold);
@@ -406,9 +471,13 @@ function dailyCalibratedSummary(
     row.pnl += net;
     row.trades += 1;
     byDay.set(day,row);
+    resolvedAts.push(sample.resolvedAt);
   }
 
-  return summarizeDailyRows([...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)));
+  return summarizeDailyRows(
+    [...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)),
+    peakConcurrentTrades(resolvedAts,options.horizon)
+  );
 }
 
 function evaluateCalibrated(
