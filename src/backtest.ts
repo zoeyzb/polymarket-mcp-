@@ -552,7 +552,9 @@ export function runWalkForwardEdgeBacktest(
       minEdgeBps:selected.minEdgeBps,
       bufferBps,
       binSize,
-      minBinSamples
+      minBinSamples,
+      minHoldoutRoiPct,
+      minHoldoutHitRatePct:minValidationHitRatePct
     },
     folds:selected.folds,
     foldSummary:{
@@ -592,6 +594,7 @@ export function runCalibratedEdgeBacktest(
   const minValidationTrades = Math.max(5, Math.min(1000, Number(options.minValidationTrades ?? 40)));
   const minValidationHitRatePct = Math.max(0, Math.min(100, Number(options.minValidationHitRatePct ?? 95)));
   const minHoldoutTrades = Math.max(10, Math.min(5000, Number(options.minHoldoutTrades ?? 50)));
+  const minHoldoutRoiPct = Math.max(0, Math.min(100, Number(options.minHoldoutRoiPct ?? 0.25)));
   const thresholds = (options.thresholds?.length ? options.thresholds : [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95])
     .map(v => Math.max(0.5, Math.min(0.999, Number(v))))
     .filter(Number.isFinite);
@@ -688,7 +691,9 @@ export function runCalibratedEdgeBacktest(
     selected.validation.roiPct !== null &&
     selected.validation.roiPct > 0 &&
     holdout.roiPct !== null &&
-    holdout.roiPct > 0 &&
+    holdout.roiPct >= minHoldoutRoiPct &&
+    holdout.hitRatePct !== null &&
+    holdout.hitRatePct >= minValidationHitRatePct &&
     holdout.trades >= minHoldoutTrades;
 
   return {
@@ -712,7 +717,7 @@ export function runCalibratedEdgeBacktest(
     assumptions: [
       "Policy selection uses training calibration and validation ROI only; the holdout is not used to tune parameters.",
       "A policy must have positive validation ROI, a minimum validation trade count, and the configured validation hit-rate floor before it is evaluated for deployment.",
-      "Deployment gate additionally requires positive untouched holdout ROI and the configured minimum holdout trade count.",
+      "Deployment gate additionally requires the configured untouched holdout ROI floor, holdout hit-rate floor, and minimum holdout trade count.",
       "Execution buffer is applied as adverse price movement before payout math.",
       "Historical performance does not guarantee future results."
     ]
