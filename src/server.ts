@@ -29,6 +29,7 @@ import {
   getCalibrationStats,
   getHistoricalCalibrationSummary,
   getHistoricalCandidateStats,
+  getHistoricalReplaySamples,
   getLatestMultiHorizonSnapshot,
   getMultiHorizonSnapshotStats,
   getOpportunityIntelligenceStats,
@@ -68,6 +69,7 @@ import {
   recordResolution,
   testPersistenceConnection,
   upsertHistoricalCalibrationSample,
+  upsertWalletProfileAddress,
   upsertWorkerHeartbeat
 } from "./persistence.js";
 import { inferFinalResolution } from "./resolutions.js";
@@ -79,10 +81,13 @@ import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./hi
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
-import type { NormalizedBook } from "./types.js";
+import { runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-object.js";
+import { renderDashboardHtml } from "./dashboard.js";
+import type { NormalizedBook, ScanCandidate } from "./types.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 type ServiceRole = "all" | "api" | "scanner" | "streams" | "history" | "maintenance";
 const SERVICE_ROLE: ServiceRole = (
   ["all", "api", "scanner", "streams", "history", "maintenance"].includes(
@@ -110,6 +115,116 @@ function json(res: ServerResponse, status: number, body: unknown) {
 
 function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function html(res: ServerResponse, status: number, body: string) {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "content-security-policy":
+      "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+  });
+  res.end(body);
+}
+
+function normalizeOpportunityLane(value: string | null): OpportunityLane {
+  return value === "developing_6h" || value === "broader_24h" || value === "structural"
+    ? value
+    : "urgent_2h";
+}
+
+async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
+  const latest = await getLatestMultiHorizonSnapshot();
+  if (!latest) return { generatedAt: null, lane, opportunities: [] };
+
+  let candidates: ScanCandidate[] = [];
+  if (lane === "urgent_2h") candidates = latest.lanes?.urgent2h?.candidates || [];
+  else if (lane === "developing_6h") candidates = latest.lanes?.developing6h?.candidates || [];
+  else if (lane === "broader_24h") candidates = latest.lanes?.broader24h?.candidates || [];
+  else candidates = latest.structuralUniverse?.binary || [];
+
+  return {
+    generatedAt: latest.generatedAt,
+    ageSeconds: latest.ageSeconds ?? null,
+    lane,
+    opportunities: candidates
+      .slice(0, Math.max(1, Math.min(500, limit)))
+      .map(candidate => buildUnifiedOpportunity(candidate, lane, latest.generatedAt))
+  };
+}
+
+async function runHistoricalReplay(options: {
+  years?: number;
+  horizon?: string;
+  threshold?: number;
+  trainFraction?: number;
+  bufferBps?: number;
+  domains?: string[];
+}) {
+  const years = Math.max(0.25, Math.min(10, Number(options.years ?? 3)));
+  const horizon = options.horizon || "tMinus60m";
+  const threshold = Math.max(0.5, Math.min(0.999, Number(options.threshold ?? 0.75)));
+  const samples = await getHistoricalReplaySamples({
+    years,
+    domains: options.domains,
+    limit: 100000
+  });
+  return {
+    years,
+    sampleCount: samples.length,
+    backtest: runProbabilityThresholdBacktest(samples, {
+      horizon,
+      threshold,
+      trainFraction: options.trainFraction ?? 0.7,
+      bufferBps: options.bufferBps ?? 50,
+      domains: options.domains
+    }),
+    sweep: sweepProbabilityThresholds(samples, {
+      horizon,
+      thresholds: [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95],
+      trainFraction: options.trainFraction ?? 0.7,
+      bufferBps: options.bufferBps ?? 50,
+      domains: options.domains
+    })
+  };
+}
+
+function extractOpenAIText(payload: any): string {
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  const parts = Array.isArray(payload?.output)
+    ? payload.output.flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
+    : [];
+  return parts.map((part: any) => part?.text || part?.output_text || "").filter(Boolean).join("\n");
+}
+
+async function askOpenAI(prompt: string) {
+  const apiKey = process.env.OPENAI_API_KEY || "";
+  if (!apiKey) throw new Error("OPENAI_API_KEY_not_configured");
+  const latest = await loadUnifiedOpportunities("urgent_2h", 20);
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || "gpt-5.6",
+      input: [
+        {
+          role: "system",
+          content:
+            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns."
+        },
+        {
+          role: "user",
+          content: `${prompt}\n\nCurrent unified opportunities:\n${JSON.stringify(latest.opportunities)}`
+        }
+      ]
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(`openai_${response.status}: ${JSON.stringify(payload)}`);
+  return { text: extractOpenAIText(payload), responseId: payload?.id ?? null };
 }
 
 function errorMessage(error: unknown) {
@@ -784,6 +899,45 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.unified_opportunities",
+    {
+      description: "Return one normalized opportunity schema across urgent, developing, 24-hour, or structural lanes. Includes strategy tags, executable economics, evidence, scores, and risk flags.",
+      inputSchema: {
+        lane: z.enum(["urgent_2h","developing_6h","broader_24h","structural"]).default("urgent_2h"),
+        limit: z.number().int().min(1).max(500).default(50)
+      }
+    },
+    async input => textResult(await loadUnifiedOpportunities(input.lane, input.limit))
+  );
+
+  server.registerTool(
+    "markets.historical_replay",
+    {
+      description: "Run chronological train/holdout replay on resolved non-political historical calibration samples. Reports hit rate, ROI, drawdown and sample counts; it is not a guarantee of future performance.",
+      inputSchema: {
+        years: z.number().min(0.25).max(10).default(3),
+        horizon: z.enum(["tMinus120m","tMinus60m","tMinus30m","tMinus15m","tMinus5m"]).default("tMinus60m"),
+        threshold: z.number().min(0.5).max(0.999).default(0.75),
+        trainFraction: z.number().min(0.1).max(0.9).default(0.7),
+        bufferBps: z.number().min(0).max(5000).default(50),
+        domains: z.array(z.enum(["sports","crypto","weather"])).optional()
+      }
+    },
+    async input => textResult(await runHistoricalReplay(input))
+  );
+
+  server.registerTool(
+    "wallet.connect",
+    {
+      description: "Store only the public EVM wallet address for the primary non-custodial profile. This never stores a private key and does not enable live trading.",
+      inputSchema: {
+        address: z.string().regex(/^0x[a-fA-F0-9]{40}$/)
+      }
+    },
+    async input => textResult(await upsertWalletProfileAddress(input.address))
+  );
+
+  server.registerTool(
     "wallet.status",
     {
       description: "Return the configured non-custodial trading wallet profile, control flags, and public Polymarket portfolio. No seed phrase or private key is stored."
@@ -1150,6 +1304,25 @@ function numberParam(url: URL, name: string, fallback: number, min: number, max:
 }
 
 async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  if (req.method === "POST" && url.pathname === "/api/wallet/connect") {
+    const body = await parseBody(req) as any;
+    const address = String(body?.address || "");
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      json(res, 400, { error: "invalid_evm_wallet_address" });
+    } else {
+      json(res, 200, await upsertWalletProfileAddress(address));
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/gpt") {
+    const body = await parseBody(req) as any;
+    const prompt = String(body?.prompt || "").trim();
+    if (!prompt) json(res, 400, { error: "prompt_required" });
+    else json(res, 200, await askOpenAI(prompt));
+    return true;
+  }
+
   if (req.method !== "GET") return false;
 
   if (url.pathname === "/health") {
@@ -1163,6 +1336,43 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     serviceRole: SERVICE_ROLE,
       maxScannerWindowMinutes: 120,
       now: new Date().toISOString()
+    });
+    return true;
+  }
+
+  if (url.pathname === "/dashboard") {
+    html(res, 200, renderDashboardHtml());
+    return true;
+  }
+
+  if (url.pathname === "/health/deep") {
+    const [heartbeats, persistence, snapshotStats] = await Promise.all([
+      getWorkerHeartbeats().catch(() => []),
+      getPersistenceIntegrity().catch(() => null),
+      getMultiHorizonSnapshotStats().catch(() => null)
+    ]);
+    const maxAgeMs = Math.max(30_000, Number(process.env.WORKER_HEARTBEAT_MAX_AGE_MS || 60_000));
+    const workers: Record<string, unknown> = {};
+    for (const role of ["scanner","streams","history","maintenance"]) {
+      const hb = (heartbeats as any[]).find(item => item.role === role);
+      const ageMs = hb?.updatedAt ? Date.now() - Date.parse(hb.updatedAt) : Infinity;
+      workers[role] = {
+        status: ageMs <= maxAgeMs ? "healthy" : "stale",
+        ageSeconds: Number.isFinite(ageMs) ? Math.round(ageMs / 1000) : null,
+        updatedAt: hb?.updatedAt ?? null
+      };
+    }
+    const ok = Object.values(workers).every((worker: any) => worker.status === "healthy") &&
+      Boolean((persistence as any)?.configured) &&
+      Boolean((snapshotStats as any)?.configured);
+    json(res, ok ? 200 : 503, {
+      ok,
+      version: VERSION,
+      serviceRole: SERVICE_ROLE,
+      workers,
+      persistence,
+      snapshotStats,
+      realtime: realtimeTracker.getHealth()
     });
     return true;
   }
@@ -1396,6 +1606,31 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/unified-opportunities") {
+    const lane = normalizeOpportunityLane(url.searchParams.get("lane"));
+    json(res, 200, await loadUnifiedOpportunities(
+      lane,
+      numberParam(url, "limit", 50, 1, 500)
+    ));
+    return true;
+  }
+
+  if (url.pathname === "/api/historical-replay") {
+    const domains = (url.searchParams.get("domains") || "")
+      .split(",")
+      .map(value => value.trim())
+      .filter(value => ["sports","crypto","weather"].includes(value));
+    json(res, 200, await runHistoricalReplay({
+      years: numberParam(url, "years", 3, 0.25, 10),
+      horizon: url.searchParams.get("horizon") || "tMinus60m",
+      threshold: numberParam(url, "threshold", 0.75, 0.5, 0.999),
+      trainFraction: numberParam(url, "trainFraction", 0.7, 0.1, 0.9),
+      bufferBps: numberParam(url, "bufferBps", 50, 0, 5000),
+      domains: domains.length ? domains : undefined
+    }));
+    return true;
+  }
+
   if (url.pathname === "/api/opportunities") {
     json(res, 200, await scanOpportunities({
       maxMinutes: numberParam(url, "minutes", 120, 1, 120),
@@ -1445,6 +1680,10 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       tradeIntentsEnabled: String(process.env.TRADING_INTENTS_ENABLED || "false").toLowerCase() === "true",
       mcp: "/mcp",
       health: "/health",
+      deepHealth: "/health/deep",
+      dashboard: "/dashboard",
+      unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
+      historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
       opportunities: "/api/opportunities?minutes=120&limit=50",
       multiHorizon: "/api/multi-horizon?limitPerLane=100&structuralLimit=200",
       scan: "/api/closing-soon?minutes=120&limit=50&books=true&sort=opportunity",
@@ -1568,8 +1807,10 @@ const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHEC
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
 const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTION_SECONDS || 60));
 const HISTORICAL_BACKFILL_SECONDS = Math.max(300, Number(process.env.HISTORICAL_BACKFILL_SECONDS || 900));
-const HISTORICAL_LOOKBACK_HOURS = Math.max(6, Math.min(168, Number(process.env.HISTORICAL_LOOKBACK_HOURS || 48)));
-const HISTORICAL_BACKFILL_LIMIT = Math.max(1, Math.min(100, Number(process.env.HISTORICAL_BACKFILL_LIMIT || 40)));
+const HISTORICAL_LOOKBACK_HOURS = Math.max(6, Math.min(24 * 365 * 10, Number(process.env.HISTORICAL_LOOKBACK_HOURS || 24 * 365 * 3)));
+const HISTORICAL_BACKFILL_LIMIT = Math.max(1, Math.min(2000, Number(process.env.HISTORICAL_BACKFILL_LIMIT || 500)));
+const HISTORICAL_BACKFILL_WINDOW_DAYS = Math.max(1, Math.min(180, Number(process.env.HISTORICAL_BACKFILL_WINDOW_DAYS || 30)));
+const HISTORICAL_BACKFILL_RUN_MINUTES = Math.max(1, Math.min(30, Number(process.env.HISTORICAL_BACKFILL_RUN_MINUTES || 25)));
 const WALLET_INTELLIGENCE_SECONDS = Math.max(120, Number(process.env.WALLET_INTELLIGENCE_SECONDS || 300));
 const WALLET_INTELLIGENCE_LIMIT = Math.max(5, Math.min(100, Number(process.env.WALLET_INTELLIGENCE_LIMIT || 25)));
 const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
@@ -1834,53 +2075,64 @@ async function runHistoricalBackfillWorker() {
   if (historicalBackfillRunning) return;
   historicalBackfillRunning = true;
   try {
-    const end = new Date();
-    const start = new Date(end.getTime() - HISTORICAL_LOOKBACK_HOURS * 3600_000);
-    const closedMarkets = await listClosedMarketsEndingBetween(start, end, 5, 100);
-    const eligible = closedMarkets.filter(market =>
-      Boolean(market.conditionId) && classifyHistoricalDomain(market) !== null
-    );
-
-    const conditionIds = eligible
-      .map(market => String(market.conditionId || ""))
-      .filter(Boolean);
-    const known = await getKnownHistoricalCalibrationIds(conditionIds);
-    const pending = eligible
-      .filter(market => !known.has(String(market.conditionId || "")))
-      .slice(0, HISTORICAL_BACKFILL_LIMIT);
+    const runStarted = Date.now();
+    const budgetMs = HISTORICAL_BACKFILL_RUN_MINUTES * 60_000;
+    const cutoff = new Date(Date.now() - HISTORICAL_LOOKBACK_HOURS * 3600_000);
+    const summary = await getHistoricalCalibrationSummary().catch(() => null) as any;
+    let cursorEnd = summary?.firstResolvedAt
+      ? new Date(Date.parse(summary.firstResolvedAt) - 1)
+      : new Date();
+    if (!Number.isFinite(cursorEnd.getTime()) || cursorEnd < cutoff) cursorEnd = new Date();
 
     let stored = 0;
     let skipped = 0;
+    let windows = 0;
+    let checked = 0;
 
-    for (let i = 0; i < pending.length; i += 4) {
-      const batch = pending.slice(i, i + 4);
-      const samples = await Promise.all(batch.map(async market => {
-        try {
-          return await buildHistoricalCalibrationSample(market);
-        } catch {
-          return null;
-        }
-      }));
+    while (cursorEnd > cutoff && Date.now() - runStarted < budgetMs) {
+      const cursorStart = new Date(Math.max(
+        cutoff.getTime(),
+        cursorEnd.getTime() - HISTORICAL_BACKFILL_WINDOW_DAYS * 86_400_000
+      ));
+      const closedMarkets = await listClosedMarketsEndingBetween(cursorStart, cursorEnd, 20, 100);
+      checked += closedMarkets.length;
+      const eligible = closedMarkets.filter(market =>
+        Boolean(market.conditionId) && classifyHistoricalDomain(market) !== null
+      );
+      const conditionIds = eligible.map(market => String(market.conditionId || "")).filter(Boolean);
+      const known = await getKnownHistoricalCalibrationIds(conditionIds);
+      const pending = eligible
+        .filter(market => !known.has(String(market.conditionId || "")))
+        .slice(0, HISTORICAL_BACKFILL_LIMIT);
 
-      for (const sample of samples) {
-        if (!sample) {
-          skipped += 1;
-          continue;
+      for (let i = 0; i < pending.length && Date.now() - runStarted < budgetMs; i += 6) {
+        const batch = pending.slice(i, i + 6);
+        const samples = await Promise.all(batch.map(async market => {
+          try { return await buildHistoricalCalibrationSample(market); }
+          catch { return null; }
+        }));
+        for (const sample of samples) {
+          if (!sample) { skipped += 1; continue; }
+          await upsertHistoricalCalibrationSample(sample);
+          stored += 1;
         }
-        await upsertHistoricalCalibrationSample(sample);
-        stored += 1;
       }
+
+      windows += 1;
+      cursorEnd = new Date(cursorStart.getTime() - 1);
+      if (closedMarkets.length >= 2000) break;
     }
 
     console.log(JSON.stringify({
       level: "info",
       message: "historical_calibration_backfill",
-      lookbackHours: HISTORICAL_LOOKBACK_HOURS,
-      closedMarkets: closedMarkets.length,
-      eligible: eligible.length,
-      pending: pending.length,
+      targetLookbackHours: HISTORICAL_LOOKBACK_HOURS,
+      targetYears: Number((HISTORICAL_LOOKBACK_HOURS / (24 * 365)).toFixed(2)),
+      windows,
+      checked,
       stored,
       skipped,
+      runtimeSeconds: Number(((Date.now() - runStarted) / 1000).toFixed(1)),
       at: new Date().toISOString()
     }));
   } catch (error) {
