@@ -119,18 +119,17 @@ Additional operational endpoints:
 
 - Unified opportunity objects across urgent, developing, 24-hour, and structural lanes.
 - Strategy registry for complete-set, logical-relative-value, sports-line, maker, cross-venue, behavioral, and research signals.
-- Chronological train/holdout historical replay using resolved sports, crypto, and weather markets.
+- Chronological train/holdout historical replay using resolved non-political binary markets across sports, crypto, weather, and other categories.
 - Configurable rolling historical backfill targeting up to three years by default.
 - Replay reports hit rate **and** ROI, maximum drawdown, sample counts, and an execution haircut. A high win rate is not treated as sufficient evidence of profitability.
 - Live dashboard at `/dashboard` with opportunities, replay metrics, deep service health, public-address wallet connection, and optional GPT research chat.
 - Optional GPT analysis uses `OPENAI_API_KEY` only on the server. The key is never sent to the browser.
-- Wallet connection stores only a public EVM address. Existing live-trading feature gates and wallet-signature requirements remain unchanged.
+- Wallet connection stores only a public EVM address. The dashboard wallet/GPT mutation endpoints require a server-side `DASHBOARD_CONTROL_TOKEN`; changing the address automatically disables the wallet profile until it is deliberately re-enabled. Existing live-trading feature gates and wallet-signature requirements remain unchanged.
 
 ### New MCP tools
 
 - `markets.unified_opportunities`
 - `markets.historical_replay`
-- `wallet.connect`
 
 ### New HTTP endpoints
 
@@ -153,4 +152,8 @@ HISTORICAL_BACKFILL_WINDOW_DAYS=30
 HISTORICAL_BACKFILL_LIMIT=500
 HISTORICAL_BACKFILL_RUN_MINUTES=25
 HISTORICAL_BACKFILL_SECONDS=300
+DASHBOARD_CONTROL_TOKEN=<strong random secret>
+OPENAI_MODEL=gpt-5.6
 ```
+
+`OPENAI_API_KEY` is optional and only required for the dashboard GPT chat. Keep both secrets in Railway variables; never embed either value in browser code.
