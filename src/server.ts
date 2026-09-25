@@ -1812,6 +1812,8 @@ let historicalBackfillRunning = false;
 let walletIntelligenceRunning = false;
 let maintenanceRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
+const PERSIST_SCAN_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_SCAN_SECONDS || 300));
+const PERSIST_PACKET_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_PACKET_SECONDS || 300));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
 const STREAM_PERSIST_SECONDS = Math.max(5, Number(process.env.STREAM_PERSIST_SECONDS || 5));
 const QUOTE_COMPACTION_SECONDS = Math.max(60, Number(process.env.QUOTE_COMPACTION_SECONDS || 60));
@@ -1825,6 +1827,9 @@ const WALLET_INTELLIGENCE_LIMIT = Math.max(5, Math.min(100, Number(process.env.W
 const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
 const RAW_QUOTE_RETENTION_HOURS = Math.max(24, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 72));
 const SPORTS_EVENT_RETENTION_DAYS = Math.max(7, Number(process.env.SPORTS_EVENT_RETENTION_DAYS || 30));
+
+let lastBroadPersistenceAt = 0;
+let lastPacketPersistenceAt = 0;
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -1860,14 +1865,20 @@ async function runBackgroundScan() {
       }));
     });
 
-    await persistScan(broadScan).catch(error => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "persistence_write_failed",
-        error: errorMessage(error),
-        at: new Date().toISOString()
-      }));
-    });
+    if (Date.now() - lastBroadPersistenceAt >= PERSIST_SCAN_SECONDS * 1000) {
+      await persistScan(broadScan)
+        .then(result => {
+          if ((result as any)?.ok !== false) lastBroadPersistenceAt = Date.now();
+        })
+        .catch(error => {
+          console.error(JSON.stringify({
+            level: "error",
+            message: "persistence_write_failed",
+            error: errorMessage(error),
+            at: new Date().toISOString()
+          }));
+        });
+    }
 
     const alertCandidates = new Map<string, (typeof multi.lanes.broader24h.candidates)[number]>();
     for (const candidate of multi.lanes.broader24h.candidates) {
@@ -1891,17 +1902,21 @@ async function runBackgroundScan() {
       }));
     });
 
-    await persistOpportunityPackets(
-      multi.generatedAt,
-      [...alertCandidates.values()]
-    ).catch(error => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "opportunity_packet_persistence_failed",
-        error: errorMessage(error),
-        at: new Date().toISOString()
-      }));
-    });
+    if (Date.now() - lastPacketPersistenceAt >= PERSIST_PACKET_SECONDS * 1000) {
+      await persistOpportunityPackets(
+        multi.generatedAt,
+        [...alertCandidates.values()]
+      ).then(() => {
+        lastPacketPersistenceAt = Date.now();
+      }).catch(error => {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "opportunity_packet_persistence_failed",
+          error: errorMessage(error),
+          at: new Date().toISOString()
+        }));
+      });
+    }
 
     // Realtime subscriptions focus on <=6h markets plus any structural edge anywhere.
     // The 24h/full-universe lanes are still rescanned from fresh CLOB books each cycle.
