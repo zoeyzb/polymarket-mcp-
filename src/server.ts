@@ -82,7 +82,7 @@ import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./hi
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
-import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
 import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-object.js";
 import { renderDashboardHtml } from "./dashboard.js";
 import type { NormalizedBook, ScanCandidate } from "./types.js";
@@ -196,7 +196,23 @@ async function runHistoricalReplay(options: {
       thresholds: [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95],
       minEdgesBps: [0,25,50,100,150,200,300],
       minBinSamples: 20,
-      minValidationTrades: 20
+      minValidationTrades: 40,
+      minValidationHitRatePct: 95,
+      minHoldoutTrades: 50
+    }),
+    walkForward: runWalkForwardEdgeBacktest(samples, {
+      horizon,
+      bufferBps: options.bufferBps ?? 50,
+      domains: options.domains,
+      thresholds: [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95],
+      minEdgesBps: [0,25,50,100,150,200,300],
+      minBinSamples: 20,
+      walkForwardFolds: 4,
+      minFoldTrades: 30,
+      minFoldRoiPct: 0.25,
+      minFoldHitRatePct: 95,
+      minHoldoutTrades: 100,
+      minHoldoutRoiPct: 0.25
     })
   };
 }
