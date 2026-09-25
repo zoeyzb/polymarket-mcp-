@@ -652,8 +652,7 @@ export function runWalkForwardEdgeBacktest(
       feeMode,
       minBinSamples,
       minHoldoutRoiPct,
-      minHoldoutHitRatePct:minValidationHitRatePct,
-      feeMode
+      minHoldoutHitRatePct:minValidationHitRatePct
     },
     folds:selected.folds,
     foldSummary:{
