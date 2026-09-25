@@ -82,7 +82,7 @@ import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./hi
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
-import { runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
 import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-object.js";
 import { renderDashboardHtml } from "./dashboard.js";
 import type { NormalizedBook, ScanCandidate } from "./types.js";
@@ -186,6 +186,17 @@ async function runHistoricalReplay(options: {
       trainFraction: options.trainFraction ?? 0.7,
       bufferBps: options.bufferBps ?? 50,
       domains: options.domains
+    }),
+    calibrated: runCalibratedEdgeBacktest(samples, {
+      horizon,
+      trainFraction: 0.6,
+      validationFraction: 0.2,
+      bufferBps: options.bufferBps ?? 50,
+      domains: options.domains,
+      thresholds: [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95],
+      minEdgesBps: [0,25,50,100,150,200,300],
+      minBinSamples: 20,
+      minValidationTrades: 20
     })
   };
 }

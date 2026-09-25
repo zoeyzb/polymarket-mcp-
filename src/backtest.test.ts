@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
 
 const samples = [
   { conditionId:"1", resolvedAt:"2026-01-01T00:00:00Z", domain:"sports", actualOutcome0:1 as const, prices:{tMinus60m:0.8} },
@@ -59,5 +59,46 @@ describe("historical probability replay", () => {
     expect(result.results).toHaveLength(3);
     expect(result.note.toLowerCase()).toContain("not");
     expect(result.note.toLowerCase()).toContain("guarantee");
+  });
+
+  it("applies execution buffer to entry price before payout math", () => {
+    const result = runProbabilityThresholdBacktest(samples, {
+      horizon:"tMinus60m",
+      threshold:0.7,
+      trainFraction:0.5,
+      bufferBps:100
+    });
+    const noBuffer = runProbabilityThresholdBacktest(samples, {
+      horizon:"tMinus60m",
+      threshold:0.7,
+      trainFraction:0.5,
+      bufferBps:0
+    });
+    expect(result.holdout.totalPnlPerDollarStake).toBeLessThan(noBuffer.holdout.totalPnlPerDollarStake);
+  });
+
+  it("keeps calibrated policy selection separate from untouched holdout", () => {
+    const synthetic = Array.from({ length: 180 }, (_, i) => {
+      const price = i % 2 === 0 ? 0.8 : 0.2;
+      return {
+        conditionId:String(i + 1),
+        resolvedAt:new Date(Date.UTC(2026,0,i + 1)).toISOString(),
+        domain:"sports",
+        actualOutcome0:(price > 0.5 ? 1 : 0) as 0 | 1,
+        prices:{tMinus60m:price}
+      };
+    });
+    const result = runCalibratedEdgeBacktest(synthetic, {
+      horizon:"tMinus60m",
+      bufferBps:25,
+      minBinSamples:5,
+      minValidationTrades:5,
+      thresholds:[0.7,0.8],
+      minEdgesBps:[0,25,50]
+    });
+    expect(result.selectedPolicy).not.toBeNull();
+    expect(result.validation?.roiPct).toBeGreaterThan(0);
+    expect(result.holdout?.roiPct).toBeGreaterThan(0);
+    expect(result.deployable).toBe(true);
   });
 });
