@@ -1487,19 +1487,32 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       getMultiHorizonSnapshotStats().catch(() => null)
     ]);
     const maxAgeMs = Math.max(30_000, Number(process.env.WORKER_HEARTBEAT_MAX_AGE_MS || 60_000));
+    const snapshotMaxAgeMs = Math.max(60_000, Number(process.env.SNAPSHOT_MAX_AGE_MS || 300_000));
+    const latestSnapshotAt = (snapshotStats as any)?.latestGeneratedAt
+      ? Date.parse((snapshotStats as any).latestGeneratedAt)
+      : NaN;
+    const snapshotAgeMs = Number.isFinite(latestSnapshotAt) ? Date.now() - latestSnapshotAt : Infinity;
+
     const workers: Record<string, unknown> = {};
     for (const role of ["scanner","streams","history","maintenance"]) {
       const hb = (heartbeats as any[]).find(item => item.role === role);
       const ageMs = hb?.updatedAt ? Date.now() - Date.parse(hb.updatedAt) : Infinity;
+      let status = ageMs <= maxAgeMs ? "healthy" : "stale";
+      if (role === "scanner" && snapshotAgeMs > snapshotMaxAgeMs) status = "stale";
       workers[role] = {
-        status: ageMs <= maxAgeMs ? "healthy" : "stale",
+        status,
         ageSeconds: Number.isFinite(ageMs) ? Math.round(ageMs / 1000) : null,
-        updatedAt: hb?.updatedAt ?? null
+        updatedAt: hb?.updatedAt ?? null,
+        ...(role === "scanner" ? {
+          snapshotAgeSeconds: Number.isFinite(snapshotAgeMs) ? Math.round(snapshotAgeMs / 1000) : null,
+          snapshotMaxAgeSeconds: Math.round(snapshotMaxAgeMs / 1000)
+        } : {})
       };
     }
     const ok = Object.values(workers).every((worker: any) => worker.status === "healthy") &&
       Boolean((persistence as any)?.configured) &&
-      Boolean((snapshotStats as any)?.configured);
+      Boolean((snapshotStats as any)?.configured) &&
+      snapshotAgeMs <= snapshotMaxAgeMs;
     json(res, ok ? 200 : 503, {
       ok,
       version: VERSION,
