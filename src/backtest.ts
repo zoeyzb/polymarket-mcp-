@@ -331,6 +331,40 @@ function buildCalibration(
   return out;
 }
 
+function dailyCalibratedSummary(
+  samples: HistoricalReplaySample[],
+  calibration: Map<string, CalibrationBin>,
+  options: {
+    horizon: string;
+    threshold: number;
+    minEdgeBps: number;
+    bufferBps: number;
+    binSize: number;
+  }
+): DailyPnlSummary {
+  const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
+
+  for (const sample of samples) {
+    const trade = prepareTrade(sample, options.horizon, options.threshold);
+    if (!trade) continue;
+    const calibrated = calibration.get(binKey(trade.quotedPrice, options.binSize));
+    if (!calibrated) continue;
+
+    const executionPrice = Math.min(0.999999, trade.quotedPrice + options.bufferBps / 10_000);
+    const expectedEdge = calibrated.calibratedWinProbability - executionPrice;
+    if (expectedEdge < options.minEdgeBps / 10_000) continue;
+
+    const net = trade.didWin ? (1 / executionPrice) - 1 : -1;
+    const day = new Date(sample.resolvedAt).toISOString().slice(0,10);
+    const row = byDay.get(day) || {day,pnl:0,trades:0};
+    row.pnl += net;
+    row.trades += 1;
+    byDay.set(day,row);
+  }
+
+  return summarizeDailyRows([...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)));
+}
+
 function evaluateCalibrated(
   samples: HistoricalReplaySample[],
   calibration: Map<string, CalibrationBin>,
@@ -535,6 +569,13 @@ export function runWalkForwardEdgeBacktest(
     bufferBps,
     binSize
   });
+  const holdoutDaily = dailyCalibratedSummary(holdoutSamples, finalCalibration, {
+    horizon:options.horizon,
+    threshold:selected.threshold,
+    minEdgeBps:selected.minEdgeBps,
+    bufferBps,
+    binSize
+  });
 
   const deployable =
     holdout.trades >= minHoldoutTrades &&
@@ -563,6 +604,7 @@ export function runWalkForwardEdgeBacktest(
       totalTrades:selected.totalTrades
     },
     holdout,
+    holdoutDaily,
     deployable,
     reason:deployable ? "all_walk_forward_folds_and_holdout_pass" : "final_holdout_gate_failed",
     requirements:{
@@ -687,6 +729,13 @@ export function runCalibratedEdgeBacktest(
     bufferBps,
     binSize
   });
+  const holdoutDaily = dailyCalibratedSummary(holdoutSamples, selected.calibration, {
+    horizon: options.horizon,
+    threshold: selected.threshold,
+    minEdgeBps: selected.minEdgeBps,
+    bufferBps,
+    binSize
+  });
   const deployable =
     selected.validation.roiPct !== null &&
     selected.validation.roiPct > 0 &&
@@ -712,6 +761,7 @@ export function runCalibratedEdgeBacktest(
     },
     validation: selected.validation,
     holdout,
+    holdoutDaily,
     deployable,
     reason: deployable ? "positive_validation_and_holdout_roi" : "holdout_gate_failed",
     assumptions: [
