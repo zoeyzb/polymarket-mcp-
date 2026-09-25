@@ -25,6 +25,8 @@ export interface CalibratedEdgeOptions {
   binSize?: number;
   minBinSamples?: number;
   minValidationTrades?: number;
+  minValidationHitRatePct?: number;
+  minHoldoutTrades?: number;
 }
 
 export interface BacktestSlice {
@@ -300,7 +302,9 @@ export function runCalibratedEdgeBacktest(
   const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
   const binSize = Math.max(0.01, Math.min(0.2, Number(options.binSize ?? 0.05)));
   const minBinSamples = Math.max(5, Math.min(500, Number(options.minBinSamples ?? 20)));
-  const minValidationTrades = Math.max(5, Math.min(1000, Number(options.minValidationTrades ?? 20)));
+  const minValidationTrades = Math.max(5, Math.min(1000, Number(options.minValidationTrades ?? 40)));
+  const minValidationHitRatePct = Math.max(0, Math.min(100, Number(options.minValidationHitRatePct ?? 95)));
+  const minHoldoutTrades = Math.max(10, Math.min(5000, Number(options.minHoldoutTrades ?? 50)));
   const thresholds = (options.thresholds?.length ? options.thresholds : [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95])
     .map(v => Math.max(0.5, Math.min(0.999, Number(v))))
     .filter(Number.isFinite);
@@ -354,7 +358,9 @@ export function runCalibratedEdgeBacktest(
       if (
         validation.trades < minValidationTrades ||
         validation.roiPct === null ||
-        validation.roiPct <= 0
+        validation.roiPct <= 0 ||
+        validation.hitRatePct === null ||
+        validation.hitRatePct < minValidationHitRatePct
       ) continue;
       const score = validation.roiPct * Math.sqrt(validation.trades);
       candidates.push({ threshold, minEdgeBps, validation, calibration, score });
@@ -377,7 +383,7 @@ export function runCalibratedEdgeBacktest(
       reason: "no_positive_validation_policy",
       assumptions: [
         "Policy selection uses training calibration and validation ROI only; the holdout is not used to tune parameters.",
-        "A policy must have positive validation ROI and a minimum validation trade count before it is evaluated for deployment.",
+        "A policy must have positive validation ROI, a minimum validation trade count, and the configured validation hit-rate floor before it is evaluated for deployment.",
         "Execution buffer is applied as adverse price movement before payout math.",
         "Historical performance does not guarantee future results."
       ]
@@ -396,7 +402,7 @@ export function runCalibratedEdgeBacktest(
     selected.validation.roiPct > 0 &&
     holdout.roiPct !== null &&
     holdout.roiPct > 0 &&
-    holdout.trades >= Math.max(10, Math.floor(minValidationTrades / 2));
+    holdout.trades >= minHoldoutTrades;
 
   return {
     generatedAt: new Date().toISOString(),
@@ -418,8 +424,8 @@ export function runCalibratedEdgeBacktest(
     reason: deployable ? "positive_validation_and_holdout_roi" : "holdout_gate_failed",
     assumptions: [
       "Policy selection uses training calibration and validation ROI only; the holdout is not used to tune parameters.",
-      "A policy must have positive validation ROI and a minimum validation trade count before it is evaluated for deployment.",
-      "Deployment gate additionally requires positive untouched holdout ROI and a minimum holdout trade count.",
+      "A policy must have positive validation ROI, a minimum validation trade count, and the configured validation hit-rate floor before it is evaluated for deployment.",
+      "Deployment gate additionally requires positive untouched holdout ROI and the configured minimum holdout trade count.",
       "Execution buffer is applied as adverse price movement before payout math.",
       "Historical performance does not guarantee future results."
     ]
