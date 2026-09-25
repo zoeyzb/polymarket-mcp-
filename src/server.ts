@@ -134,6 +134,53 @@ function normalizeOpportunityLane(value: string | null): OpportunityLane {
     : "urgent_2h";
 }
 
+let strategyPolicyCache: { at:number; value:any } | null = null;
+const STRATEGY_POLICY_CACHE_MS = Math.max(30_000, Number(process.env.STRATEGY_POLICY_CACHE_MS || 300_000));
+
+async function getProductionStrategyPolicy(force = false) {
+  if (!force && strategyPolicyCache && Date.now() - strategyPolicyCache.at < STRATEGY_POLICY_CACHE_MS) {
+    return strategyPolicyCache.value;
+  }
+
+  const replay = await runHistoricalReplay({
+    years:3,
+    horizon:"tMinus60m",
+    threshold:0.9,
+    bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
+  });
+
+  const walk = replay.walkForward as any;
+  const calibrated = replay.calibrated as any;
+  const policy = {
+    generatedAt:new Date().toISOString(),
+    sampleCount:replay.sampleCount,
+    structuralStrategiesEnabled:true,
+    directionalProbabilityModelEnabled:walk?.deployable === true,
+    directionalReason:walk?.reason || "walk_forward_unavailable",
+    walkForward:{
+      deployable:walk?.deployable === true,
+      selectedPolicy:walk?.selectedPolicy ?? null,
+      foldSummary:walk?.foldSummary ?? null,
+      holdout:walk?.holdout ?? null,
+      requirements:walk?.requirements ?? null
+    },
+    calibratedResearch:{
+      deployable:calibrated?.deployable === true,
+      validation:calibrated?.validation ?? null,
+      holdout:calibrated?.holdout ?? null,
+      reason:calibrated?.reason ?? null
+    },
+    enforcement:{
+      liveStructuralExecution:"allowed_when_depth_and_buffer_checks_pass",
+      directionalProbabilityExecution:walk?.deployable === true ? "allowed_by_backtest_gate" : "blocked",
+      gptMayOverrideGate:false
+    }
+  };
+
+  strategyPolicyCache = {at:Date.now(),value:policy};
+  return policy;
+}
+
 async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
   const latest = await getLatestMultiHorizonSnapshot();
   if (!latest) return { generatedAt: null, lane, opportunities: [] };
@@ -144,10 +191,24 @@ async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
   else if (lane === "broader_24h") candidates = latest.lanes?.broader24h?.candidates || [];
   else candidates = latest.structuralUniverse?.binary || [];
 
+  const policy = await getProductionStrategyPolicy().catch(error => ({
+    generatedAt:new Date().toISOString(),
+    structuralStrategiesEnabled:true,
+    directionalProbabilityModelEnabled:false,
+    directionalReason:"policy_evaluation_failed",
+    error:errorMessage(error),
+    enforcement:{
+      liveStructuralExecution:"allowed_when_depth_and_buffer_checks_pass",
+      directionalProbabilityExecution:"blocked",
+      gptMayOverrideGate:false
+    }
+  }));
+
   return {
     generatedAt: latest.generatedAt,
     ageSeconds: latest.ageSeconds ?? null,
     lane,
+    strategyPolicy:policy,
     opportunities: candidates
       .slice(0, Math.max(1, Math.min(500, limit)))
       .map(candidate => buildUnifiedOpportunity(candidate, lane, latest.generatedAt))
@@ -241,11 +302,11 @@ async function askOpenAI(prompt: string) {
         {
           role: "system",
           content:
-            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns. For political or election markets, remain strictly descriptive and structural-only: do not predict winners, rank candidates or parties, recommend positions, assess electability, or provide directional trading advice."
+            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data and production strategy policy. Structural execution edges may be discussed when depth and buffer checks pass. Directional probability/calibration signals are BLOCKED whenever productionStrategyPolicy.directionalProbabilityModelEnabled is false; you may not override that gate or present a blocked model as executable. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns. For political or election markets, remain strictly descriptive and structural-only: do not predict winners, rank candidates or parties, recommend positions, assess electability, or provide directional trading advice."
         },
         {
           role: "user",
-          content: `${prompt}\n\nCurrent unified opportunities:\n${JSON.stringify(latest.opportunities)}`
+          content: `${prompt}\n\nProduction strategy policy:\n${JSON.stringify(latest.strategyPolicy)}\n\nCurrent unified opportunities:\n${JSON.stringify(latest.opportunities)}`
         }
       ]
     })
@@ -974,6 +1035,14 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "markets.strategy_policy",
+    {
+      description: "Return the enforced production strategy policy. Structural strategies remain independently executable when depth/buffer checks pass; directional probability/calibration strategies are blocked unless the walk-forward and untouched holdout gates pass."
+    },
+    async () => textResult(await getProductionStrategyPolicy())
+  );
+
+  server.registerTool(
     "markets.unified_opportunities",
     {
       description: "Return one normalized opportunity schema across urgent, developing, 24-hour, or structural lanes. Includes strategy tags, executable economics, evidence, scores, and risk flags.",
@@ -1677,6 +1746,11 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/strategy-policy") {
+    json(res, 200, await getProductionStrategyPolicy(url.searchParams.get("force") === "true"));
+    return true;
+  }
+
   if (url.pathname === "/api/unified-opportunities") {
     const lane = normalizeOpportunityLane(url.searchParams.get("lane"));
     json(res, 200, await loadUnifiedOpportunities(
@@ -1755,6 +1829,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       storageHealth: "/api/storage-health",
       dashboard: "/dashboard",
       unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
+      strategyPolicy: "/api/strategy-policy",
       historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
       opportunities: "/api/opportunities?minutes=120&limit=50",
       multiHorizon: "/api/multi-horizon?limitPerLane=100&structuralLimit=200",
