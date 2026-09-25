@@ -93,6 +93,8 @@ describe("historical probability replay", () => {
       bufferBps:25,
       minBinSamples:5,
       minValidationTrades:5,
+      minHoldoutTrades:20,
+      minValidationHitRatePct:95,
       thresholds:[0.7,0.8],
       minEdgesBps:[0,25,50]
     });
