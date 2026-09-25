@@ -47,6 +47,24 @@ export interface BacktestSlice {
   endAt: string | null;
 }
 
+export interface DailyPnlSummary {
+  activeDays: number;
+  profitableDays: number;
+  losingDays: number;
+  flatDays: number;
+  profitableDayPct: number | null;
+  avgTradesPerActiveDay: number | null;
+  avgPnlPerDollarStakePerDay: number | null;
+  medianPnlPerDollarStakePerDay: number | null;
+  worstDayPnlPerDollarStake: number | null;
+  bestDayPnlPerDollarStake: number | null;
+  requiredDailyTurnoverUsd: {
+    target100: number | null;
+    target500: number | null;
+    target1000: number | null;
+  };
+}
+
 export interface ProbabilityThresholdBacktest {
   generatedAt: string;
   horizon: string;
@@ -56,6 +74,7 @@ export interface ProbabilityThresholdBacktest {
   eligibleSamples: number;
   training: BacktestSlice;
   holdout: BacktestSlice;
+  holdoutDaily: DailyPnlSummary;
   assumptions: string[];
 }
 
@@ -68,6 +87,72 @@ function iso(value: string | null) {
   if (!value) return null;
   const ts = Date.parse(value);
   return Number.isFinite(ts) ? new Date(ts).toISOString() : null;
+}
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b)=>a-b);
+  const mid = Math.floor(sorted.length/2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+}
+
+function summarizeDailyRows(rows: Array<{ day:string; pnl:number; trades:number }>): DailyPnlSummary {
+  const activeDays = rows.length;
+  const profitableDays = rows.filter(r=>r.pnl > 0).length;
+  const losingDays = rows.filter(r=>r.pnl < 0).length;
+  const flatDays = rows.filter(r=>r.pnl === 0).length;
+  const pnls = rows.map(r=>r.pnl);
+  const totalPnl = pnls.reduce((a,b)=>a+b,0);
+  const avgPnl = activeDays ? totalPnl / activeDays : null;
+  const avgTrades = activeDays ? rows.reduce((a,b)=>a+b.trades,0) / activeDays : null;
+  const turnoverFor = (target:number) =>
+    avgPnl && avgPnl > 0 && avgTrades && avgTrades > 0
+      ? target / (avgPnl / avgTrades)
+      : null;
+
+  return {
+    activeDays,
+    profitableDays,
+    losingDays,
+    flatDays,
+    profitableDayPct: activeDays ? round((profitableDays / activeDays) * 100, 3) : null,
+    avgTradesPerActiveDay: avgTrades === null ? null : round(avgTrades, 3),
+    avgPnlPerDollarStakePerDay: avgPnl === null ? null : round(avgPnl, 6),
+    medianPnlPerDollarStakePerDay: activeDays ? round(median(pnls) || 0, 6) : null,
+    worstDayPnlPerDollarStake: activeDays ? round(Math.min(...pnls), 6) : null,
+    bestDayPnlPerDollarStake: activeDays ? round(Math.max(...pnls), 6) : null,
+    requiredDailyTurnoverUsd: {
+      target100: turnoverFor(100) === null ? null : round(turnoverFor(100)!, 2),
+      target500: turnoverFor(500) === null ? null : round(turnoverFor(500)!, 2),
+      target1000: turnoverFor(1000) === null ? null : round(turnoverFor(1000)!, 2)
+    }
+  };
+}
+
+function dailyThresholdSummary(
+  samples: HistoricalReplaySample[],
+  horizon: string,
+  threshold: number,
+  bufferBps: number
+): DailyPnlSummary {
+  const byDay = new Map<string,{day:string;pnl:number;trades:number}>();
+  for (const sample of samples) {
+    const p0 = Number(sample.prices?.[horizon]);
+    if (!Number.isFinite(p0) || p0 <= 0 || p0 >= 1) continue;
+    const chooseOutcome0 = p0 >= threshold;
+    const chooseOutcome1 = p0 <= 1-threshold;
+    if (!chooseOutcome0 && !chooseOutcome1) continue;
+    const quotedPrice = chooseOutcome0 ? p0 : 1-p0;
+    const executionPrice = Math.min(0.999999, quotedPrice + bufferBps/10_000);
+    const didWin = chooseOutcome0 ? sample.actualOutcome0 === 1 : sample.actualOutcome0 === 0;
+    const net = didWin ? (1/executionPrice)-1 : -1;
+    const day = new Date(sample.resolvedAt).toISOString().slice(0,10);
+    const row = byDay.get(day) || {day,pnl:0,trades:0};
+    row.pnl += net;
+    row.trades += 1;
+    byDay.set(day,row);
+  }
+  return summarizeDailyRows([...byDay.values()].sort((a,b)=>a.day.localeCompare(b.day)));
 }
 
 function evaluate(samples: HistoricalReplaySample[], horizon: string, threshold: number, bufferBps: number): BacktestSlice {
@@ -152,6 +237,7 @@ export function runProbabilityThresholdBacktest(
     eligibleSamples: eligible.length,
     training: evaluate(trainingSamples, options.horizon, threshold, bufferBps),
     holdout: evaluate(holdoutSamples, options.horizon, threshold, bufferBps),
+    holdoutDaily: dailyThresholdSummary(holdoutSamples, options.horizon, threshold, bufferBps),
     assumptions: [
       "Each replay trade risks one dollar at the historical implied probability.",
       "Execution buffer is applied as adverse price movement before payout math; it is still not a reconstruction of historical queue position, fees, or slippage.",
