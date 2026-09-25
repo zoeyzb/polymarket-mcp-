@@ -1,6 +1,7 @@
-release=2026-09-21T00:45Z
-verified_head=fdb137da2ee8e2a0362718a018486f4a90691b95
+release=2026-09-26T00:00Z
+verified_head=4a56154541b3d957878bff71947462cb1c4bb22a
 typecheck=passed
 tests=passed
 build=passed
-features=sports-moneyline,sports-spreads,sports-totals,team-totals,player-props,period-markets,exact-score,score-bands,thresholds,live-scoreboard,sports-line-monotonicity,sports-board
+version=0.5.0
+features=multi-horizon,unified-opportunities,three-year-history,chronological-replay,threshold-sweep,dashboard,deep-health,authenticated-wallet-connect,authenticated-gpt,non-custodial-trade-controls
