@@ -903,6 +903,7 @@ export async function getHistoricalCalibrationSummary() {
       count(*) filter (where domain='sports')::int as "sportsSamples",
       count(*) filter (where domain='crypto')::int as "cryptoSamples",
       count(*) filter (where domain='weather')::int as "weatherSamples",
+      count(*) filter (where domain='other')::int as "otherSamples",
       min(resolved_at) as "firstResolvedAt",
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.historical_calibration
@@ -1567,6 +1568,11 @@ export async function upsertWalletProfileAddress(
        id, wallet_address, chain_id, enabled, metadata, updated_at
      ) values ($1,$2,137,false,'{}'::jsonb,now())
      on conflict (id) do update set
+       enabled = case
+         when lower(coalesce(polymarket_brain.wallet_profiles.wallet_address,'')) = lower(excluded.wallet_address)
+         then polymarket_brain.wallet_profiles.enabled
+         else false
+       end,
        wallet_address = excluded.wallet_address,
        updated_at = now()
      returning
