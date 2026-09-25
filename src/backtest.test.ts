@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalendarWalkForwardEdgeBacktest, runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
 
 const samples = [
   { conditionId:"1", resolvedAt:"2026-01-01T00:00:00Z", domain:"sports", actualOutcome0:1 as const, prices:{tMinus60m:0.8} },
@@ -77,6 +77,44 @@ describe("historical probability replay", () => {
       bufferBps:0
     });
     expect(result.holdout.totalPnlPerDollarStake).toBeLessThan(noBuffer.holdout.totalPnlPerDollarStake);
+  });
+
+  it("enforces calendar-window daily consistency before deployment", () => {
+    const start = Date.UTC(2026,0,1);
+    const synthetic = Array.from({ length: 2400 }, (_, i) => {
+      const price = i % 2 === 0 ? 0.8 : 0.2;
+      return {
+        conditionId:"cal-"+String(i+1),
+        resolvedAt:new Date(start + i * 3 * 3600_000).toISOString(),
+        domain:"sports",
+        actualOutcome0:(price > 0.5 ? 1 : 0) as 0 | 1,
+        prices:{tMinus60m:price}
+      };
+    });
+    const result = runCalendarWalkForwardEdgeBacktest(synthetic,{
+      horizon:"tMinus60m",
+      bufferBps:25,
+      feeMode:"none",
+      minBinSamples:5,
+      calendarLookbackDays:120,
+      calendarFoldDays:30,
+      calendarHoldoutDays:30,
+      minFoldTrades:10,
+      minFoldRoiPct:0.1,
+      minFoldHitRatePct:95,
+      minFoldActiveDays:5,
+      minFoldProfitableDayPct:80,
+      minHoldoutTrades:20,
+      minHoldoutRoiPct:0.1,
+      minValidationHitRatePct:95,
+      minHoldoutActiveDays:5,
+      minHoldoutProfitableDayPct:80,
+      thresholds:[0.7,0.8],
+      minEdgesBps:[0,25]
+    });
+    expect(result.deployable).toBe(true);
+    expect(result.folds.length).toBeGreaterThanOrEqual(2);
+    expect(result.holdoutDaily?.activeDays ?? 0).toBeGreaterThanOrEqual(5);
   });
 
   it("requires every walk-forward period to clear the profit floor before deployment", () => {
