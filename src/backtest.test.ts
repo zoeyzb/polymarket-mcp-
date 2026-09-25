@@ -36,6 +36,8 @@ describe("historical probability replay", () => {
     expect(result.holdout.hitRatePct).toBe(100);
     expect(result.holdout.totalPnlPerDollarStake).toBeGreaterThan(0);
     expect(result.holdout.roiPct).toBeGreaterThan(0);
+    expect(result.holdoutDaily.activeDays).toBeGreaterThan(0);
+    expect(result.holdoutDaily.requiredDailyTurnoverUsd.target100).toBeGreaterThan(0);
   });
 
   it("returns stable zero-trade metrics for empty inputs", () => {
