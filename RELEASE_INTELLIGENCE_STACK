@@ -1,7 +1,7 @@
-release=2026-09-26T04:45Z
-verified_head=7ad4a06a43ed9e5f3b2ff314a28033917a90c3a5
+release=2026-09-26T04:50Z
+verified_head=05c8c8f6119c6def8a0a135a75e2886a89264a02
 typecheck=passed
 tests=passed
 build=passed
-version=0.5.14
-features=multi-horizon,unified-opportunities,three-year-history,chronological-replay,dashboard,deep-health,authenticated-wallet-connect,authenticated-gpt,storage-backpressure,compact-persistence,storage-health,upstream-retries,price-aware-execution,calibrated-roi-gating,history-window-fallback,gpt-self-test,conservative-deployment-gate,walk-forward-profit-floor,daily-pnl-targets,backend-strategy-gating,calibrated-holdout-floor,active-universe-scan-fix,snapshot-freshness-health,domain-specific-strategy-policy,walk-forward-daily-pnl,fee-aware-daily-pnl
+version=0.5.15
+features=multi-horizon,unified-opportunities,three-year-history,chronological-replay,dashboard,deep-health,authenticated-wallet-connect,authenticated-gpt,storage-backpressure,compact-persistence,storage-health,upstream-retries,price-aware-execution,calibrated-roi-gating,history-window-fallback,gpt-self-test,conservative-deployment-gate,walk-forward-profit-floor,daily-pnl-targets,backend-strategy-gating,calibrated-holdout-floor,active-universe-scan-fix,snapshot-freshness-health,domain-specific-strategy-policy,walk-forward-daily-pnl,fee-aware-daily-pnl,sports-category-priority
