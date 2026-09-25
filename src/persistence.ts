@@ -909,6 +909,9 @@ export async function getHistoricalCalibrationSummary() {
       count(*) filter (where domain='crypto')::int as "cryptoSamples",
       count(*) filter (where domain='weather')::int as "weatherSamples",
       count(*) filter (where domain='other')::int as "otherSamples",
+      count(*) filter (
+        where source_payload->>'calibrationVersion' = 'v2-causal-price'
+      )::int as "causalV2Samples",
       min(resolved_at) as "firstResolvedAt",
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.historical_calibration
