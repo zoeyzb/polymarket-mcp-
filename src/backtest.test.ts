@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, sweepProbabilityThresholds } from "./backtest.js";
+import { runCalibratedEdgeBacktest, runProbabilityThresholdBacktest, runWalkForwardEdgeBacktest, sweepProbabilityThresholds } from "./backtest.js";
 
 const samples = [
   { conditionId:"1", resolvedAt:"2026-01-01T00:00:00Z", domain:"sports", actualOutcome0:1 as const, prices:{tMinus60m:0.8} },
@@ -75,6 +75,64 @@ describe("historical probability replay", () => {
       bufferBps:0
     });
     expect(result.holdout.totalPnlPerDollarStake).toBeLessThan(noBuffer.holdout.totalPnlPerDollarStake);
+  });
+
+  it("requires every walk-forward period to clear the profit floor before deployment", () => {
+    const synthetic = Array.from({ length: 500 }, (_, i) => {
+      const price = i % 2 === 0 ? 0.8 : 0.2;
+      return {
+        conditionId:"wf-"+String(i + 1),
+        resolvedAt:new Date(Date.UTC(2025,0,1) + i * 3600_000).toISOString(),
+        domain:"sports",
+        actualOutcome0:(price > 0.5 ? 1 : 0) as 0 | 1,
+        prices:{tMinus60m:price}
+      };
+    });
+    const result = runWalkForwardEdgeBacktest(synthetic, {
+      horizon:"tMinus60m",
+      bufferBps:25,
+      minBinSamples:5,
+      walkForwardFolds:4,
+      minFoldTrades:10,
+      minFoldRoiPct:0.1,
+      minFoldHitRatePct:95,
+      minHoldoutTrades:20,
+      minHoldoutRoiPct:0.1,
+      thresholds:[0.7,0.8],
+      minEdgesBps:[0,25,50]
+    });
+    expect(result.folds).toHaveLength(4);
+    expect(result.folds.every(f => (f.roiPct ?? -1) > 0)).toBe(true);
+    expect(result.deployable).toBe(true);
+  });
+
+  it("rejects a policy when one walk-forward period is bad", () => {
+    const synthetic = Array.from({ length: 500 }, (_, i) => {
+      const price = i % 2 === 0 ? 0.8 : 0.2;
+      const badWindow = i >= 300 && i < 360;
+      const actual = badWindow ? (price > 0.5 ? 0 : 1) : (price > 0.5 ? 1 : 0);
+      return {
+        conditionId:"bad-"+String(i + 1),
+        resolvedAt:new Date(Date.UTC(2025,0,1) + i * 3600_000).toISOString(),
+        domain:"sports",
+        actualOutcome0:actual as 0 | 1,
+        prices:{tMinus60m:price}
+      };
+    });
+    const result = runWalkForwardEdgeBacktest(synthetic, {
+      horizon:"tMinus60m",
+      bufferBps:25,
+      minBinSamples:5,
+      walkForwardFolds:4,
+      minFoldTrades:10,
+      minFoldRoiPct:0.1,
+      minFoldHitRatePct:95,
+      minHoldoutTrades:20,
+      minHoldoutRoiPct:0.1,
+      thresholds:[0.7,0.8],
+      minEdgesBps:[0,25,50]
+    });
+    expect(result.deployable).toBe(false);
   });
 
   it("keeps calibrated policy selection separate from untouched holdout", () => {
