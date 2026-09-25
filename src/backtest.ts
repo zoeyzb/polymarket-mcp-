@@ -27,6 +27,11 @@ export interface CalibratedEdgeOptions {
   minValidationTrades?: number;
   minValidationHitRatePct?: number;
   minHoldoutTrades?: number;
+  walkForwardFolds?: number;
+  minFoldTrades?: number;
+  minFoldRoiPct?: number;
+  minFoldHitRatePct?: number;
+  minHoldoutRoiPct?: number;
 }
 
 export interface BacktestSlice {
@@ -290,6 +295,202 @@ function evaluateCalibrated(
     maxDrawdownPerDollarStake: round(maxDrawdown, 6),
     startAt: samples.length ? iso(samples[0].resolvedAt) : null,
     endAt: samples.length ? iso(samples[samples.length - 1].resolvedAt) : null
+  };
+}
+
+export function runWalkForwardEdgeBacktest(
+  rawSamples: HistoricalReplaySample[],
+  options: CalibratedEdgeOptions
+) {
+  const bufferBps = Math.max(0, Math.min(5000, Number(options.bufferBps ?? 50)));
+  const binSize = Math.max(0.01, Math.min(0.2, Number(options.binSize ?? 0.05)));
+  const minBinSamples = Math.max(5, Math.min(500, Number(options.minBinSamples ?? 20)));
+  const minValidationHitRatePct = Math.max(0, Math.min(100, Number(options.minValidationHitRatePct ?? 95)));
+  const minHoldoutTrades = Math.max(10, Math.min(5000, Number(options.minHoldoutTrades ?? 100)));
+  const walkForwardFolds = Math.max(2, Math.min(8, Number(options.walkForwardFolds ?? 4)));
+  const minFoldTrades = Math.max(5, Math.min(2000, Number(options.minFoldTrades ?? 30)));
+  const minFoldRoiPct = Math.max(0, Math.min(100, Number(options.minFoldRoiPct ?? 0.25)));
+  const minFoldHitRatePct = Math.max(0, Math.min(100, Number(options.minFoldHitRatePct ?? 95)));
+  const minHoldoutRoiPct = Math.max(0, Math.min(100, Number(options.minHoldoutRoiPct ?? 0.25)));
+  const thresholds = (options.thresholds?.length ? options.thresholds : [0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95])
+    .map(v => Math.max(0.5, Math.min(0.999, Number(v))))
+    .filter(Number.isFinite);
+  const minEdgesBps = (options.minEdgesBps?.length ? options.minEdgesBps : [0,25,50,100,150,200,300])
+    .map(v => Math.max(0, Math.min(5000, Number(v))))
+    .filter(Number.isFinite);
+  const allowedDomains = options.domains?.length ? new Set(options.domains) : null;
+
+  const eligible = rawSamples
+    .filter(sample =>
+      Boolean(sample.conditionId) &&
+      Number.isFinite(Date.parse(sample.resolvedAt)) &&
+      (!allowedDomains || allowedDomains.has(sample.domain)) &&
+      Number.isFinite(Number(sample.prices?.[options.horizon]))
+    )
+    .sort((a, b) => Date.parse(a.resolvedAt) - Date.parse(b.resolvedAt));
+
+  if (eligible.length < 100) {
+    return {
+      generatedAt:new Date().toISOString(),
+      horizon:options.horizon,
+      eligibleSamples:eligible.length,
+      selectedPolicy:null,
+      folds:[],
+      holdout:null,
+      deployable:false,
+      reason:"insufficient_samples"
+    };
+  }
+
+  const holdoutStart = Math.max(1, Math.floor(eligible.length * 0.9));
+  const preHoldout = eligible.slice(0, holdoutStart);
+  const holdoutSamples = eligible.slice(holdoutStart);
+  const initialTrainEnd = Math.max(1, Math.floor(preHoldout.length * 0.5));
+  const validationSpan = preHoldout.length - initialTrainEnd;
+  const foldSize = Math.max(1, Math.floor(validationSpan / walkForwardFolds));
+
+  const candidateResults:Array<{
+    threshold:number;
+    minEdgeBps:number;
+    folds:Array<BacktestSlice>;
+    minRoi:number;
+    avgRoi:number;
+    totalTrades:number;
+    score:number;
+  }> = [];
+
+  for (const threshold of thresholds) {
+    for (const minEdgeBps of minEdgesBps) {
+      const folds:Array<BacktestSlice> = [];
+      let valid = true;
+
+      for (let fold = 0; fold < walkForwardFolds; fold++) {
+        const foldStart = initialTrainEnd + fold * foldSize;
+        const foldEnd = fold === walkForwardFolds - 1
+          ? preHoldout.length
+          : Math.min(preHoldout.length, foldStart + foldSize);
+        if (foldEnd <= foldStart) continue;
+
+        const calibrationSamples = preHoldout.slice(0, foldStart);
+        const foldSamples = preHoldout.slice(foldStart, foldEnd);
+        const calibration = buildCalibration(
+          calibrationSamples,
+          options.horizon,
+          threshold,
+          binSize,
+          minBinSamples
+        );
+        const result = evaluateCalibrated(foldSamples, calibration, {
+          horizon:options.horizon,
+          threshold,
+          minEdgeBps,
+          bufferBps,
+          binSize
+        });
+        folds.push(result);
+
+        if (
+          result.trades < minFoldTrades ||
+          result.roiPct === null ||
+          result.roiPct < minFoldRoiPct ||
+          result.hitRatePct === null ||
+          result.hitRatePct < minFoldHitRatePct
+        ) {
+          valid = false;
+          break;
+        }
+      }
+
+      if (!valid || folds.length !== walkForwardFolds) continue;
+      const rois = folds.map(f => Number(f.roiPct || 0));
+      const minRoi = Math.min(...rois);
+      const avgRoi = rois.reduce((a,b)=>a+b,0) / rois.length;
+      const totalTrades = folds.reduce((sum,f)=>sum+f.trades,0);
+      const score = minRoi * Math.sqrt(totalTrades) + avgRoi;
+      candidateResults.push({threshold,minEdgeBps,folds,minRoi,avgRoi,totalTrades,score});
+    }
+  }
+
+  candidateResults.sort((a,b)=>b.score-a.score);
+  const selected = candidateResults[0] || null;
+
+  if (!selected) {
+    return {
+      generatedAt:new Date().toISOString(),
+      horizon:options.horizon,
+      eligibleSamples:eligible.length,
+      selectedPolicy:null,
+      folds:[],
+      holdout:null,
+      deployable:false,
+      reason:"no_policy_profitable_in_every_walk_forward_fold",
+      requirements:{
+        walkForwardFolds,
+        minFoldTrades,
+        minFoldRoiPct,
+        minFoldHitRatePct,
+        minHoldoutTrades,
+        minHoldoutRoiPct
+      }
+    };
+  }
+
+  const finalCalibration = buildCalibration(
+    preHoldout,
+    options.horizon,
+    selected.threshold,
+    binSize,
+    minBinSamples
+  );
+  const holdout = evaluateCalibrated(holdoutSamples, finalCalibration, {
+    horizon:options.horizon,
+    threshold:selected.threshold,
+    minEdgeBps:selected.minEdgeBps,
+    bufferBps,
+    binSize
+  });
+
+  const deployable =
+    holdout.trades >= minHoldoutTrades &&
+    holdout.roiPct !== null &&
+    holdout.roiPct >= minHoldoutRoiPct &&
+    holdout.hitRatePct !== null &&
+    holdout.hitRatePct >= minValidationHitRatePct;
+
+  return {
+    generatedAt:new Date().toISOString(),
+    horizon:options.horizon,
+    eligibleSamples:eligible.length,
+    selectedPolicy:{
+      threshold:selected.threshold,
+      minEdgeBps:selected.minEdgeBps,
+      bufferBps,
+      binSize,
+      minBinSamples
+    },
+    folds:selected.folds,
+    foldSummary:{
+      minRoiPct:round(selected.minRoi,3),
+      avgRoiPct:round(selected.avgRoi,3),
+      totalTrades:selected.totalTrades
+    },
+    holdout,
+    deployable,
+    reason:deployable ? "all_walk_forward_folds_and_holdout_pass" : "final_holdout_gate_failed",
+    requirements:{
+      walkForwardFolds,
+      minFoldTrades,
+      minFoldRoiPct,
+      minFoldHitRatePct,
+      minHoldoutTrades,
+      minHoldoutRoiPct
+    },
+    assumptions:[
+      "Each validation fold is evaluated strictly after the data used to calibrate it.",
+      "A policy is rejected if any walk-forward fold is below the configured ROI, hit-rate, or trade-count floor.",
+      "The final holdout is untouched during policy selection.",
+      "Historical stability reduces overfitting risk but cannot guarantee future profitability."
+    ]
   };
 }
 
