@@ -239,6 +239,35 @@ async function askOpenAI(prompt: string) {
   return { text: extractOpenAIText(payload), responseId: payload?.id ?? null };
 }
 
+async function runOpenAISelfTest() {
+  const apiKey = process.env.OPENAI_API_KEY || "";
+  if (!apiKey) return { ok: false as const, configured: false, reason: "OPENAI_API_KEY_not_configured" };
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: process.env.OPENAI_MODEL || "gpt-5.6",
+      input: "Reply with exactly OK."
+    })
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`openai_self_test_${response.status}: ${JSON.stringify(payload)}`);
+  }
+
+  return {
+    ok: true as const,
+    configured: true,
+    model: process.env.OPENAI_MODEL || "gpt-5.6",
+    responseId: payload?.id ?? null
+  };
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2155,7 +2184,41 @@ async function runHistoricalBackfillWorker() {
         cursorEnd.getTime() - windowDays * 86_400_000
       ));
 
-      const closedMarkets = await listClosedMarketsEndingBetween(cursorStart, cursorEnd, 50, 100);
+      let closedMarkets;
+      try {
+        closedMarkets = await listClosedMarketsEndingBetween(cursorStart, cursorEnd, 50, 100);
+      } catch (error) {
+        const message = errorMessage(error);
+        if (windowDays > 1) {
+          saturatedWindows += 1;
+          windowDays = Math.max(1, Math.floor(windowDays / 2));
+          console.warn(JSON.stringify({
+            level: "warn",
+            message: "historical_backfill_window_retry",
+            error: message,
+            cursorStart: cursorStart.toISOString(),
+            cursorEnd: cursorEnd.toISOString(),
+            nextWindowDays: windowDays,
+            at: new Date().toISOString()
+          }));
+          continue;
+        }
+
+        // A single persistently failing day should not stall the entire
+        // multi-year cursor forever. Skip that one-day window and continue.
+        console.warn(JSON.stringify({
+          level: "warn",
+          message: "historical_backfill_window_skipped",
+          error: message,
+          cursorStart: cursorStart.toISOString(),
+          cursorEnd: cursorEnd.toISOString(),
+          at: new Date().toISOString()
+        }));
+        windows += 1;
+        cursorEnd = new Date(cursorStart.getTime() - 1);
+        windowDays = HISTORICAL_BACKFILL_WINDOW_DAYS;
+        continue;
+      }
 
       if (closedMarkets.length >= 5000 && windowDays > 1) {
         saturatedWindows += 1;
@@ -2293,6 +2356,22 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       error: errorMessage(error),
       at: new Date().toISOString()
     })));
+
+  if (ROLE_API) {
+    runOpenAISelfTest()
+      .then(result => console.log(JSON.stringify({
+        level: result.ok ? "info" : "warn",
+        message: result.ok ? "gpt_self_test" : "gpt_self_test_skipped",
+        result,
+        at: new Date().toISOString()
+      })))
+      .catch(error => console.error(JSON.stringify({
+        level: "error",
+        message: "gpt_self_test_failed",
+        error: errorMessage(error),
+        at: new Date().toISOString()
+      })));
+  }
 
   runWorkerHeartbeat().catch(() => {});
   setInterval(() => {
