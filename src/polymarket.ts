@@ -10,26 +10,42 @@ async function fetchJson<T>(
   init: RequestInit = {},
   timeoutMs = DEFAULT_TIMEOUT_MS
 ): Promise<T> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        "user-agent": "zoey-polymarket-mcp/0.2",
-        accept: "application/json",
-        ...(init.body ? { "content-type": "application/json" } : {}),
-        ...(init.headers || {})
-      }
-    });
-    if (!response.ok) {
-      throw new Error(`Upstream ${response.status} ${response.statusText}: ${url}`);
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  const attempts = Math.max(1, Math.min(5, Number(process.env.UPSTREAM_RETRY_ATTEMPTS || 3)));
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          "user-agent": "zoey-polymarket-mcp/0.5",
+          accept: "application/json",
+          ...(init.body ? { "content-type": "application/json" } : {}),
+          ...(init.headers || {})
+        }
+      });
+
+      if (response.ok) return await response.json() as T;
+
+      const error = new Error(`Upstream ${response.status} ${response.statusText}: ${url}`);
+      if (!retryableStatuses.has(response.status) || attempt === attempts) throw error;
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    return await response.json() as T;
-  } finally {
-    clearTimeout(timer);
+
+    const baseDelay = Math.max(100, Number(process.env.UPSTREAM_RETRY_BASE_MS || 400));
+    await new Promise(resolve => setTimeout(resolve, baseDelay * (2 ** (attempt - 1))));
   }
+
+  throw lastError instanceof Error ? lastError : new Error(`Upstream request failed: ${url}`);
 }
 
 function numberOf(value: unknown): number {
