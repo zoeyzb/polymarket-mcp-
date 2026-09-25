@@ -773,7 +773,10 @@ export async function getAlertStats() {
   return { configured: true, ...rows[0] };
 }
 
-export async function getKnownHistoricalCalibrationIds(conditionIds: string[]) {
+export async function getKnownHistoricalCalibrationIds(
+  conditionIds: string[],
+  calibrationVersion = "v2-causal-price"
+) {
   const known = new Set<string>();
   if (!pool || conditionIds.length === 0) return known;
 
@@ -781,8 +784,9 @@ export async function getKnownHistoricalCalibrationIds(conditionIds: string[]) {
   const { rows } = await pool.query(
     `select condition_id
      from polymarket_brain.historical_calibration
-     where condition_id = any($1::text[])`,
-    [unique]
+     where condition_id = any($1::text[])
+       and source_payload->>'calibrationVersion' = $2`,
+    [unique, calibrationVersion]
   );
 
   for (const row of rows) known.add(String(row.condition_id));

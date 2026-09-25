@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isPoliticalMarket, POLITICAL_DIRECTIONAL_FLAGS } from "./domain-policy.js";
-import { classifyHistoricalDomain } from "./historical-calibration.js";
+import { classifyHistoricalDomain, latestPriceAtOrBefore } from "./historical-calibration.js";
 import { auditScanResult } from "./audit.js";
 import { classifyMarketCategories, primaryMarketCategory } from "./category-taxonomy.js";
 import type { GammaMarket, ScanCandidate, ScanResult } from "./types.js";
@@ -139,6 +139,15 @@ describe("NegRisk basket audit", () => {
 });
 
 describe("historical calibration domain classification", () => {
+  it("never samples a historical price after the target timestamp", () => {
+    const points = [
+      { t: 940, p: 0.40 },
+      { t: 995, p: 0.45 },
+      { t: 1005, p: 0.99 }
+    ];
+    expect(latestPriceAtOrBefore(points, 1000, 120)).toBe(0.45);
+  });
+
   it("classifies sports markets", () => {
     expect(classifyHistoricalDomain({
       question: "Map 2 Total Rounds: Over/Under 30.5",

@@ -3,6 +3,7 @@ import { getPriceHistoryRange, parseNumberArray, parseStringArray } from "./poly
 import { isPoliticalMarket } from "./domain-policy.js";
 
 export type HistoricalDomain = "sports" | "crypto" | "weather" | "other";
+export const HISTORICAL_CALIBRATION_VERSION = "v2-causal-price";
 
 export interface HistoricalCalibrationSample {
   conditionId: string;
@@ -19,6 +20,8 @@ export interface HistoricalCalibrationSample {
   prices: Record<string, number>;
   brier: Record<string, number>;
   sourcePayload: {
+    calibrationVersion: string;
+    samplingMethod: "latest_at_or_before_target";
     finalOutcomePrices: number[];
     horizonsMinutes: number[];
     availableHorizons: string[];
@@ -104,16 +107,16 @@ function parseHistory(payload: unknown): Array<{ t: number; p: number }> {
     .sort((a: { t: number }, b: { t: number }) => a.t - b.t);
 }
 
-function nearestPrice(
+export function latestPriceAtOrBefore(
   points: Array<{ t: number; p: number }>,
   targetTs: number,
-  toleranceSeconds = 12 * 60
+  maxStalenessSeconds = 12 * 60
 ): number | null {
-  let best: { distance: number; p: number } | null = null;
+  let best: { t: number; p: number } | null = null;
   for (const point of points) {
-    const distance = Math.abs(point.t - targetTs);
-    if (distance > toleranceSeconds) continue;
-    if (!best || distance < best.distance) best = { distance, p: point.p };
+    if (point.t > targetTs) continue;
+    if (targetTs - point.t > maxStalenessSeconds) continue;
+    if (!best || point.t > best.t) best = point;
   }
   return best?.p ?? null;
 }
@@ -161,7 +164,7 @@ export async function buildHistoricalCalibrationSample(
   const brier: Record<string, number> = {};
 
   for (const horizon of HORIZONS_MINUTES) {
-    const probability = nearestPrice(points, resolvedTs - horizon * 60);
+    const probability = latestPriceAtOrBefore(points, resolvedTs - horizon * 60);
     if (probability === null) continue;
     const key = `tMinus${horizon}m`;
     prices[key] = Number(probability.toFixed(6));
@@ -185,6 +188,8 @@ export async function buildHistoricalCalibrationSample(
     prices,
     brier,
     sourcePayload: {
+      calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
+      samplingMethod: "latest_at_or_before_target",
       finalOutcomePrices: finalPrices,
       horizonsMinutes: [...HORIZONS_MINUTES],
       availableHorizons: Object.keys(prices)
