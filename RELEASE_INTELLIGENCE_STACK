@@ -1,7 +1,7 @@
-release=2026-09-26T03:15Z
-verified_head=22ea63106893f8fdf0f640d058fc9ad20a0b5736
+release=2026-09-26T03:20Z
+verified_head=7ad095330a1c5041437f6968155032731cebc704
 typecheck=passed
 tests=passed
 build=passed
-version=0.5.3
-features=multi-horizon,unified-opportunities,three-year-history,chronological-replay,dashboard,deep-health,authenticated-wallet-connect,authenticated-gpt,storage-backpressure,compact-persistence,storage-health,upstream-retries,price-aware-execution,calibrated-roi-gating
+version=0.5.4
+features=multi-horizon,unified-opportunities,three-year-history,chronological-replay,dashboard,deep-health,authenticated-wallet-connect,authenticated-gpt,storage-backpressure,compact-persistence,storage-health,upstream-retries,price-aware-execution,calibrated-roi-gating,history-window-fallback,gpt-self-test
