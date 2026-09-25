@@ -2273,3 +2273,38 @@ export function persistenceConfig() {
     writerLeaseSeconds: WRITER_LEASE_SECONDS
   };
 }
+
+
+export async function getStorageHealth() {
+  if (!pool) return { configured:false, reason:"not_configured" };
+
+  const { rows } = await pool.query(`
+    select
+      n.nspname as schema_name,
+      c.relname as relation_name,
+      pg_total_relation_size(c.oid)::bigint as total_bytes,
+      pg_relation_size(c.oid)::bigint as table_bytes,
+      pg_indexes_size(c.oid)::bigint as index_bytes
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'polymarket_brain'
+      and c.relkind in ('r','m')
+    order by pg_total_relation_size(c.oid) desc
+  `);
+
+  const tables = rows.map(row => ({
+    schema: String(row.schema_name),
+    relation: String(row.relation_name),
+    totalBytes: Number(row.total_bytes || 0),
+    tableBytes: Number(row.table_bytes || 0),
+    indexBytes: Number(row.index_bytes || 0)
+  }));
+  const totalBytes = tables.reduce((sum, row) => sum + row.totalBytes, 0);
+
+  return {
+    configured:true,
+    totalBytes,
+    totalMiB: Math.round((totalBytes / 1024 / 1024) * 100) / 100,
+    tables
+  };
+}
