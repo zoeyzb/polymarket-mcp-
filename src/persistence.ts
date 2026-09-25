@@ -1520,6 +1520,78 @@ export async function getBehavioralShockBacktest(options?: {
   };
 }
 
+export async function getHistoricalReplaySamples(options?: {
+  years?: number;
+  domains?: string[];
+  limit?: number;
+}) {
+  if (!pool) return [];
+  const years = Math.max(0.25, Math.min(10, Number(options?.years ?? 3)));
+  const limit = Math.max(1, Math.min(100000, Number(options?.limit ?? 50000)));
+  const domains = (options?.domains || []).filter(Boolean);
+
+  const { rows } = await pool.query(
+    `select
+       condition_id as "conditionId",
+       resolved_at as "resolvedAt",
+       domain,
+       actual_outcome0 as "actualOutcome0",
+       prices
+     from polymarket_brain.historical_calibration
+     where resolved_at >= now() - ($1 || ' years')::interval
+       and ($2::text[] = '{}'::text[] or domain = any($2::text[]))
+     order by resolved_at asc
+     limit $3`,
+    [years, domains, limit]
+  );
+
+  return rows.map(row => ({
+    conditionId: String(row.conditionId),
+    resolvedAt: new Date(row.resolvedAt).toISOString(),
+    domain: String(row.domain),
+    actualOutcome0: Number(row.actualOutcome0) === 1 ? 1 as const : 0 as const,
+    prices: row.prices && typeof row.prices === "object" ? row.prices as Record<string, number> : {}
+  }));
+}
+
+export async function upsertWalletProfileAddress(
+  walletAddress: string,
+  id = "primary"
+) {
+  if (!pool) throw new Error("persistence_not_configured");
+  const address = walletAddress.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error("invalid_evm_wallet_address");
+
+  const { rows } = await pool.query(
+    `insert into polymarket_brain.wallet_profiles (
+       id, wallet_address, chain_id, enabled, metadata, updated_at
+     ) values ($1,$2,137,false,'{}'::jsonb,now())
+     on conflict (id) do update set
+       wallet_address = excluded.wallet_address,
+       updated_at = now()
+     returning
+       id,
+       wallet_address as "walletAddress",
+       funder_address as "funderAddress",
+       proxy_wallet as "proxyWallet",
+       signature_type as "signatureType",
+       wallet_type as "walletType",
+       chain_id as "chainId",
+       enabled,
+       metadata,
+       created_at as "createdAt",
+       updated_at as "updatedAt"`,
+    [id, address]
+  );
+
+  return {
+    ...rows[0],
+    configured: true,
+    privateKeyStored: false,
+    signingMode: "user_wallet_signature"
+  };
+}
+
 export async function getWalletProfile(id = "primary") {
   if (!pool) return null;
   const { rows } = await pool.query(
