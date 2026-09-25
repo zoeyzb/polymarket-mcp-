@@ -83,9 +83,11 @@ export async function* iterateActiveMarketPages(
   const boundedPageSize = Math.max(1, Math.min(100, pageSize));
   let cursor = "";
   const seenCursors = new Set<string>();
+  const seenPageFingerprints = new Set<string>();
 
   for (let page = 0; page < maxPages; page++) {
     const params = new URLSearchParams({
+      active: "true",
       closed: "false",
       limit: String(boundedPageSize)
     });
@@ -97,8 +99,15 @@ export async function* iterateActiveMarketPages(
     const raw = Array.isArray(payload?.markets) ? payload.markets : [];
     if (!raw.length) break;
 
+    const fingerprint = raw
+      .map(market => String(market.id || market.conditionId || market.slug || ""))
+      .filter(Boolean)
+      .join("|");
+    if (fingerprint && seenPageFingerprints.has(fingerprint)) break;
+    if (fingerprint) seenPageFingerprints.add(fingerprint);
+
     const active = raw.filter(market =>
-      market.active !== false &&
+      market.active === true &&
       market.closed !== true
     );
     if (active.length) yield active;
