@@ -78,7 +78,7 @@ import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
 import { buildSportsBoard } from "./sports-board.js";
-import { buildHistoricalCalibrationSample, classifyHistoricalDomain } from "./historical-calibration.js";
+import { buildHistoricalCalibrationSample, classifyHistoricalDomain, HISTORICAL_CALIBRATION_VERSION } from "./historical-calibration.js";
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
@@ -2337,24 +2337,38 @@ async function runHistoricalBackfillWorker() {
     const cutoff = new Date(Date.now() - HISTORICAL_LOOKBACK_HOURS * 3600_000);
     const summary = await getHistoricalCalibrationSummary().catch(() => null) as any;
 
+    const sampleCount = Number(summary?.sampleCount || 0);
+    const causalV2Samples = Number(summary?.causalV2Samples || 0);
+    const recalibrationComplete = sampleCount > 0 && causalV2Samples >= sampleCount;
+
     if (summary?.firstResolvedAt) {
       const earliestStored = Date.parse(summary.firstResolvedAt);
-      if (Number.isFinite(earliestStored) && earliestStored <= cutoff.getTime()) {
+      if (
+        Number.isFinite(earliestStored) &&
+        earliestStored <= cutoff.getTime() &&
+        recalibrationComplete
+      ) {
         console.log(JSON.stringify({
           level: "info",
           message: "historical_calibration_backfill_complete",
           firstResolvedAt: summary.firstResolvedAt,
           targetCutoff: cutoff.toISOString(),
           targetYears: Number((HISTORICAL_LOOKBACK_HOURS / (24 * 365)).toFixed(2)),
+          calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
+          causalV2Samples,
+          sampleCount,
           at: new Date().toISOString()
         }));
         return;
       }
     }
 
-    let cursorEnd = summary?.firstResolvedAt
-      ? new Date(Date.parse(summary.firstResolvedAt) - 1)
-      : new Date();
+    const needsRecalibration = sampleCount > causalV2Samples;
+    let cursorEnd = needsRecalibration
+      ? new Date()
+      : summary?.firstResolvedAt
+        ? new Date(Date.parse(summary.firstResolvedAt) - 1)
+        : new Date();
     if (!Number.isFinite(cursorEnd.getTime())) cursorEnd = new Date();
 
     let stored = 0;
@@ -2445,6 +2459,10 @@ async function runHistoricalBackfillWorker() {
       message: "historical_calibration_backfill",
       targetLookbackHours: HISTORICAL_LOOKBACK_HOURS,
       targetYears: Number((HISTORICAL_LOOKBACK_HOURS / (24 * 365)).toFixed(2)),
+      calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
+      recalibrationMode: needsRecalibration,
+      causalV2SamplesBefore: causalV2Samples,
+      sampleCountBefore: sampleCount,
       windows,
       saturatedWindows,
       checked,
