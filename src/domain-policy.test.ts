@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isPoliticalMarket, POLITICAL_DIRECTIONAL_FLAGS } from "./domain-policy.js";
 import { classifyHistoricalDomain } from "./historical-calibration.js";
 import { auditScanResult } from "./audit.js";
+import { classifyMarketCategories, primaryMarketCategory } from "./category-taxonomy.js";
 import type { GammaMarket, ScanCandidate, ScanResult } from "./types.js";
 
 describe("political structural-only policy", () => {
@@ -19,6 +20,19 @@ describe("political structural-only policy", () => {
       slug: "cs2-map-2-total-rounds"
     };
     expect(isPoliticalMarket(market)).toBe(false);
+  });
+
+  it("keeps sports primary when noisy metadata also contains election-like text", () => {
+    const market: GammaMarket = {
+      question: "Will Jamaica win on 2026-09-25?",
+      slug: "conl-jam-gua-2026-09-25-jam",
+      sportsMarketType: "moneyline",
+      gameId: "jam-gua",
+      category: "elections"
+    };
+    const categories = classifyMarketCategories(market);
+    expect(categories).toContain("sports");
+    expect(primaryMarketCategory(categories)).toBe("sports");
   });
 
   it("keeps the directional political flag denylist explicit", () => {
