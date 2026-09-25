@@ -137,42 +137,79 @@ function normalizeOpportunityLane(value: string | null): OpportunityLane {
 let strategyPolicyCache: { at:number; value:any } | null = null;
 const STRATEGY_POLICY_CACHE_MS = Math.max(30_000, Number(process.env.STRATEGY_POLICY_CACHE_MS || 300_000));
 
+function strategyDomainForCategory(category: string) {
+  const value = String(category || "other").toLowerCase();
+  if (["politics","elections"].includes(value)) return "political";
+  if (["sports","nba","basketball","soccer","games_esports"].includes(value)) return "sports";
+  if (value === "crypto") return "crypto";
+  if (value === "weather") return "weather";
+  return "other";
+}
+
 async function getProductionStrategyPolicy(force = false) {
   if (!force && strategyPolicyCache && Date.now() - strategyPolicyCache.at < STRATEGY_POLICY_CACHE_MS) {
     return strategyPolicyCache.value;
   }
 
-  const replay = await runHistoricalReplay({
-    years:3,
-    horizon:"tMinus60m",
-    threshold:0.9,
-    bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
-  });
+  const domains = ["sports","crypto","weather","other"] as const;
+  const replays = await Promise.all(domains.map(async domain => {
+    const replay = await runHistoricalReplay({
+      years:3,
+      horizon:"tMinus60m",
+      threshold:0.9,
+      bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+      domains:[domain]
+    });
+    return [domain,replay] as const;
+  }));
 
-  const walk = replay.walkForward as any;
-  const calibrated = replay.calibrated as any;
+  const perDomain: Record<string, any> = {};
+  let totalSamples = 0;
+
+  for (const [domain,replay] of replays) {
+    totalSamples += Number(replay.sampleCount || 0);
+    const walk = replay.walkForward as any;
+    const calibrated = replay.calibrated as any;
+    const enabled = walk?.deployable === true;
+    perDomain[domain] = {
+      enabled,
+      sampleCount:replay.sampleCount,
+      reason:walk?.reason || "walk_forward_unavailable",
+      walkForward:{
+        deployable:enabled,
+        selectedPolicy:walk?.selectedPolicy ?? null,
+        foldSummary:walk?.foldSummary ?? null,
+        holdout:walk?.holdout ?? null,
+        requirements:walk?.requirements ?? null
+      },
+      calibratedResearch:{
+        deployable:calibrated?.deployable === true,
+        validation:calibrated?.validation ?? null,
+        holdout:calibrated?.holdout ?? null,
+        reason:calibrated?.reason ?? null
+      }
+    };
+  }
+
+  const enabledDomains = domains.filter(domain => perDomain[domain]?.enabled === true);
   const policy = {
     generatedAt:new Date().toISOString(),
-    sampleCount:replay.sampleCount,
+    sampleCount:totalSamples,
     structuralStrategiesEnabled:true,
-    directionalProbabilityModelEnabled:walk?.deployable === true,
-    directionalReason:walk?.reason || "walk_forward_unavailable",
-    walkForward:{
-      deployable:walk?.deployable === true,
-      selectedPolicy:walk?.selectedPolicy ?? null,
-      foldSummary:walk?.foldSummary ?? null,
-      holdout:walk?.holdout ?? null,
-      requirements:walk?.requirements ?? null
-    },
-    calibratedResearch:{
-      deployable:calibrated?.deployable === true,
-      validation:calibrated?.validation ?? null,
-      holdout:calibrated?.holdout ?? null,
-      reason:calibrated?.reason ?? null
+    directionalProbabilityModelEnabled:enabledDomains.length > 0,
+    directionalProbabilityModelScope:"domain_specific",
+    enabledDomains,
+    blockedDomains:domains.filter(domain => !enabledDomains.includes(domain)),
+    perDomain,
+    political:{
+      directionalProbabilityModelEnabled:false,
+      reason:"political_directional_execution_disabled"
     },
     enforcement:{
       liveStructuralExecution:"allowed_when_depth_and_buffer_checks_pass",
-      directionalProbabilityExecution:walk?.deployable === true ? "allowed_by_backtest_gate" : "blocked",
+      directionalProbabilityExecution:enabledDomains.length
+        ? "allowed_only_for_enabled_domains"
+        : "blocked",
       gptMayOverrideGate:false
     }
   };
@@ -212,6 +249,20 @@ async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
     opportunities: candidates
       .slice(0, Math.max(1, Math.min(500, limit)))
       .map(candidate => buildUnifiedOpportunity(candidate, lane, latest.generatedAt))
+      .map(opportunity => {
+        const domain = strategyDomainForCategory(opportunity.market.category);
+        const enabled = domain !== "political" && policy?.perDomain?.[domain]?.enabled === true;
+        return {
+          ...opportunity,
+          strategyGate:{
+            domain,
+            directionalProbabilityEnabled:enabled,
+            reason:domain === "political"
+              ? "political_directional_execution_disabled"
+              : policy?.perDomain?.[domain]?.reason || "domain_policy_unavailable"
+          }
+        };
+      })
   };
 }
 
@@ -302,7 +353,7 @@ async function askOpenAI(prompt: string) {
         {
           role: "system",
           content:
-            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data and production strategy policy. Structural execution edges may be discussed when depth and buffer checks pass. Directional probability/calibration signals are BLOCKED whenever productionStrategyPolicy.directionalProbabilityModelEnabled is false; you may not override that gate or present a blocked model as executable. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns. For political or election markets, remain strictly descriptive and structural-only: do not predict winners, rank candidates or parties, recommend positions, assess electability, or provide directional trading advice."
+            "You are the analysis layer for a Polymarket research dashboard. Use only the supplied market data and production strategy policy. Structural execution edges may be discussed when depth and buffer checks pass. Directional probability/calibration signals are domain-gated: only treat them as executable when that opportunity's strategyGate.directionalProbabilityEnabled is true. Never override a blocked domain gate, never generalize a passing sports/crypto/weather/other model to another domain, and never present a blocked model as executable. Distinguish structural execution edge from directional speculation, mention uncertainty, and do not claim guaranteed returns. For political or election markets, remain strictly descriptive and structural-only: do not predict winners, rank candidates or parties, recommend positions, assess electability, or provide directional trading advice."
         },
         {
           role: "user",
