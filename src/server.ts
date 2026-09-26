@@ -2899,19 +2899,23 @@ async function runPaperEntryWorker() {
     const candidates:ScanCandidate[] = latest.lanes?.urgent2h?.candidates || [];
     let inserted=0;
     let considered=0;
+    const rejected:Record<string,number>={};
+    const reject=(reason:string) => {
+      rejected[reason]=(rejected[reason] || 0) + 1;
+    };
 
     for (const candidate of candidates) {
-      if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) continue;
-      if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) continue;
+      if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) { reject("outside_entry_window"); continue; }
+      if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) { reject("invalid_market_shape"); continue; }
       const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
-      if (domain === "political") continue;
+      if (domain === "political") { reject("political_disabled"); continue; }
 
       const domainPolicy=policy?.perDomain?.[domain];
-      if (domainPolicy?.enabled !== true) continue;
+      if (domainPolicy?.enabled !== true) { reject(`domain_disabled:${domain}`); continue; }
 
       const productionPolicy=domainPolicy?.calendarWalkForward;
       const selected=productionPolicy?.selectedPolicy;
-      if (!selected || productionPolicy?.deployable !== true) continue;
+      if (!selected || productionPolicy?.deployable !== true) { reject("production_policy_not_deployable"); continue; }
 
       const holdoutRoiPct=Number(productionPolicy?.holdout?.roiPct ?? -Infinity);
       const holdoutHitRatePct=Number(productionPolicy?.holdout?.hitRatePct ?? 0);
@@ -2922,31 +2926,31 @@ async function runPaperEntryWorker() {
         minFoldRoiPct >= PAPER_TRADE_MIN_FOLD_ROI_PCT &&
         holdoutHitRatePct >= PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT &&
         holdoutTrades >= PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES;
-      if (!positiveResearchGate) continue;
+      if (!positiveResearchGate) { reject("production_performance_gate"); continue; }
 
       const threshold=Number(selected.threshold);
-      if (!(threshold >= 0.5 && threshold < 1)) continue;
+      if (!(threshold >= 0.5 && threshold < 1)) { reject("invalid_policy_threshold"); continue; }
 
       const p0=Number(candidate.displayedOutcomePrices?.[0]);
-      if (!(p0 > 0 && p0 < 1)) continue;
+      if (!(p0 > 0 && p0 < 1)) { reject("invalid_displayed_probability"); continue; }
       let outcomeIndex=-1;
       if (p0 >= threshold) outcomeIndex=0;
       else if (p0 <= 1-threshold) outcomeIndex=1;
-      if (outcomeIndex < 0) continue;
+      if (outcomeIndex < 0) { reject("probability_below_threshold"); continue; }
 
       const book=candidate.books?.find(b=>b.tokenId===candidate.tokenIds[outcomeIndex])
         || candidate.books?.[outcomeIndex];
-      if (!book) continue;
+      if (!book) { reject("missing_order_book"); continue; }
       const execution=(book.executions || [])
         .filter(e=>Number(e.fillPct||0)>=99.5 && Number(e.budgetUsd||0)>=PAPER_TRADE_STAKE_USD)
         .sort((a,b)=>Number(a.budgetUsd)-Number(b.budgetUsd))[0]
         || (book.executions || [])
           .filter(e=>Number(e.fillPct||0)>=99.5)
           .sort((a,b)=>Number(b.budgetUsd)-Number(a.budgetUsd))[0];
-      if (!execution || execution.avgFillPrice == null) continue;
+      if (!execution || execution.avgFillPrice == null) { reject("insufficient_fill"); continue; }
 
       const stake=Math.min(PAPER_TRADE_STAKE_USD,Number(execution.spendableUsd||execution.budgetUsd||0));
-      if (!(stake > 0)) continue;
+      if (!(stake > 0)) { reject("zero_fillable_stake"); continue; }
 
       const chosenQuotedPrice=outcomeIndex===0 ? p0 : 1-p0;
       const liveCalibration=await getLiveChosenOutcomeCalibration({
@@ -2966,7 +2970,7 @@ async function runPaperEntryWorker() {
         samples:Number((liveCalibration as any)?.samples || 0),
         minSamples:Number(selected.minBinSamples ?? 20)
       });
-      if (!liveEvaluation.pass) continue;
+      if (!liveEvaluation.pass) { reject(`live_gate:${liveEvaluation.reason || "unknown"}`); continue; }
       considered += 1;
 
       const result=await createPaperTrade({
@@ -3019,7 +3023,11 @@ async function runPaperEntryWorker() {
       considered,
       inserted,
       stakeUsd:PAPER_TRADE_STAKE_USD,
+      totalCandidates:candidates.length,
+      rejected,
       voidedInvalidOpenTrades:(voided as any)?.voided ?? 0,
+      voidedNonProductionOpenTrades:(voidedNonProduction as any)?.voided ?? 0,
+      enabledProductionDomains:enabledDomains,
       voidedDomainMismatches,
       positiveRoiGate:{
         minHoldoutRoiPct:PAPER_TRADE_MIN_HOLDOUT_ROI_PCT,
