@@ -2428,3 +2428,238 @@ export async function getStorageHealth() {
     tables
   };
 }
+
+
+async function ensurePaperTradingSchema() {
+  if (!pool) return;
+  await pool.query(`
+    create table if not exists polymarket_brain.paper_trades (
+      id bigserial primary key,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      strategy_id text not null,
+      calibration_version text,
+      condition_id text,
+      market_id text,
+      slug text,
+      question text,
+      domain text,
+      outcome text,
+      token_id text,
+      entry_at timestamptz not null,
+      expected_resolution_at timestamptz,
+      entry_price numeric,
+      stake_usd numeric not null,
+      expected_edge_bps numeric,
+      expected_roi_pct numeric,
+      fee_rate numeric,
+      status text not null default 'OPEN',
+      resolved_at timestamptz,
+      winning_outcome text,
+      gross_pnl_usd numeric,
+      fee_usd numeric,
+      net_pnl_usd numeric,
+      realized_roi_pct numeric,
+      policy_snapshot jsonb not null default '{}'::jsonb,
+      market_snapshot jsonb not null default '{}'::jsonb
+    )
+  `);
+  await pool.query(`
+    create unique index if not exists paper_trades_strategy_condition_token_idx
+      on polymarket_brain.paper_trades(strategy_id, condition_id, token_id)
+  `);
+  await pool.query(`
+    create index if not exists paper_trades_status_idx
+      on polymarket_brain.paper_trades(status, entry_at)
+  `);
+}
+
+export async function createPaperTrade(input: {
+  strategyId: string;
+  calibrationVersion?: string | null;
+  conditionId?: string | null;
+  marketId?: string | null;
+  slug?: string | null;
+  question?: string | null;
+  domain?: string | null;
+  outcome?: string | null;
+  tokenId?: string | null;
+  entryAt?: string;
+  expectedResolutionAt?: string | null;
+  entryPrice: number;
+  stakeUsd: number;
+  expectedEdgeBps?: number | null;
+  expectedRoiPct?: number | null;
+  feeRate?: number | null;
+  policySnapshot?: Record<string,unknown>;
+  marketSnapshot?: Record<string,unknown>;
+}) {
+  if (!pool) return { configured:false,reason:"not_configured",inserted:false };
+  await ensurePaperTradingSchema();
+  const { rows } = await pool.query(
+    `insert into polymarket_brain.paper_trades (
+       strategy_id, calibration_version, condition_id, market_id, slug, question,
+       domain, outcome, token_id, entry_at, expected_resolution_at,
+       entry_price, stake_usd, expected_edge_bps, expected_roi_pct, fee_rate,
+       policy_snapshot, market_snapshot
+     ) values (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamptz,$11::timestamptz,
+       $12,$13,$14,$15,$16,$17::jsonb,$18::jsonb
+     )
+     on conflict (strategy_id, condition_id, token_id) do nothing
+     returning id, created_at as "createdAt"`,
+    [
+      input.strategyId,
+      input.calibrationVersion ?? null,
+      input.conditionId ?? null,
+      input.marketId ?? null,
+      input.slug ?? null,
+      input.question ?? null,
+      input.domain ?? null,
+      input.outcome ?? null,
+      input.tokenId ?? null,
+      input.entryAt || new Date().toISOString(),
+      input.expectedResolutionAt ?? null,
+      input.entryPrice,
+      input.stakeUsd,
+      input.expectedEdgeBps ?? null,
+      input.expectedRoiPct ?? null,
+      input.feeRate ?? null,
+      JSON.stringify(input.policySnapshot || {}),
+      JSON.stringify(input.marketSnapshot || {})
+    ]
+  );
+  return { configured:true,inserted:rows.length > 0,id:rows[0]?.id ?? null };
+}
+
+export async function getOpenPaperTrades(limit = 500) {
+  if (!pool) return [];
+  await ensurePaperTradingSchema();
+  const bounded=Math.max(1,Math.min(5000,limit));
+  const {rows}=await pool.query(
+    `select
+       id, strategy_id as "strategyId", calibration_version as "calibrationVersion",
+       condition_id as "conditionId", market_id as "marketId", slug, question, domain,
+       outcome, token_id as "tokenId", entry_at as "entryAt",
+       expected_resolution_at as "expectedResolutionAt",
+       entry_price::float8 as "entryPrice", stake_usd::float8 as "stakeUsd",
+       expected_edge_bps::float8 as "expectedEdgeBps",
+       expected_roi_pct::float8 as "expectedRoiPct", fee_rate::float8 as "feeRate",
+       status, policy_snapshot as "policySnapshot", market_snapshot as "marketSnapshot"
+     from polymarket_brain.paper_trades
+     where status='OPEN'
+     order by entry_at asc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}
+
+export async function settlePaperTrade(input:{
+  id:string|number;
+  winningOutcome:string|null;
+  resolvedAt?:string;
+  won:boolean;
+}) {
+  if(!pool) return {configured:false,reason:"not_configured"};
+  await ensurePaperTradingSchema();
+  const {rows}=await pool.query(
+    `select entry_price::float8 as "entryPrice",
+            stake_usd::float8 as "stakeUsd",
+            fee_rate::float8 as "feeRate"
+       from polymarket_brain.paper_trades
+       where id=$1 and status='OPEN'
+       limit 1`,
+    [input.id]
+  );
+  const row=rows[0];
+  if(!row) return {configured:true,updated:false};
+  const price=Number(row.entryPrice);
+  const stake=Number(row.stakeUsd);
+  const feeRate=Math.max(0,Number(row.feeRate||0));
+  const shares=price>0 ? stake/price : 0;
+  const gross=input.won ? shares-stake : -stake;
+  const fee=Math.max(0,shares*feeRate*price*(1-price));
+  const net=gross-fee;
+  const roi=stake>0 ? (net/stake)*100 : null;
+  await pool.query(
+    `update polymarket_brain.paper_trades
+       set status=$2,
+           resolved_at=$3::timestamptz,
+           winning_outcome=$4,
+           gross_pnl_usd=$5,
+           fee_usd=$6,
+           net_pnl_usd=$7,
+           realized_roi_pct=$8,
+           updated_at=now()
+       where id=$1`,
+    [
+      input.id,
+      input.won ? "WIN" : "LOSS",
+      input.resolvedAt || new Date().toISOString(),
+      input.winningOutcome,
+      gross,
+      fee,
+      net,
+      roi
+    ]
+  );
+  return {configured:true,updated:true,netPnlUsd:net,realizedRoiPct:roi};
+}
+
+export async function getPaperTradingStats() {
+  if(!pool) return {configured:false,reason:"not_configured"};
+  await ensurePaperTradingSchema();
+  const {rows}=await pool.query(`
+    select
+      count(*)::int as "trades",
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd",
+      avg(realized_roi_pct) filter (where status in ('WIN','LOSS'))::float8 as "avgTradeRoiPct",
+      min(realized_roi_pct) filter (where status in ('WIN','LOSS'))::float8 as "worstTradeRoiPct",
+      max(realized_roi_pct) filter (where status in ('WIN','LOSS'))::float8 as "bestTradeRoiPct",
+      min(entry_at) as "firstEntryAt",
+      max(entry_at) as "lastEntryAt",
+      max(resolved_at) as "lastResolvedAt"
+    from polymarket_brain.paper_trades
+  `);
+  const row=rows[0]||{};
+  const resolved=Number(row.wins||0)+Number(row.losses||0);
+  const resolvedStake=Number(row.resolvedStakeUsd||0);
+  const net=Number(row.netPnlUsd||0);
+  return {
+    configured:true,
+    ...row,
+    resolvedTrades:resolved,
+    winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+    aggregateRoiPct:resolvedStake>0 ? Number(((net/resolvedStake)*100).toFixed(3)) : null
+  };
+}
+
+export async function listPaperTrades(limit=100) {
+  if(!pool) return [];
+  await ensurePaperTradingSchema();
+  const bounded=Math.max(1,Math.min(1000,limit));
+  const {rows}=await pool.query(
+    `select
+       id, created_at as "createdAt", updated_at as "updatedAt",
+       strategy_id as "strategyId", calibration_version as "calibrationVersion",
+       condition_id as "conditionId", market_id as "marketId", slug, question, domain,
+       outcome, token_id as "tokenId", entry_at as "entryAt",
+       expected_resolution_at as "expectedResolutionAt",
+       entry_price::float8 as "entryPrice", stake_usd::float8 as "stakeUsd",
+       expected_edge_bps::float8 as "expectedEdgeBps",
+       expected_roi_pct::float8 as "expectedRoiPct", status,
+       resolved_at as "resolvedAt", winning_outcome as "winningOutcome",
+       gross_pnl_usd::float8 as "grossPnlUsd", fee_usd::float8 as "feeUsd",
+       net_pnl_usd::float8 as "netPnlUsd", realized_roi_pct::float8 as "realizedRoiPct"
+     from polymarket_brain.paper_trades
+     order by entry_at desc
+     limit $1`,
+    [bounded]
+  );
+  return rows;
+}

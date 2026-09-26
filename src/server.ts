@@ -55,6 +55,11 @@ import {
   getWalletControlStatus,
   getWalletProfile,
   getTradeControlStats,
+  getPaperTradingStats,
+  getOpenPaperTrades,
+  listPaperTrades,
+  createPaperTrade,
+  settlePaperTrade,
   listTradeIntents,
   createTradeIntent,
   createTradingControlRequest,
@@ -1971,6 +1976,17 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/paper-trading") {
+    json(res,200,{
+      enabled:PAPER_TRADING_ENABLED,
+      requireCausalV2Complete:PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE,
+      stakeUsd:PAPER_TRADE_STAKE_USD,
+      stats:await getPaperTradingStats(),
+      trades:await listPaperTrades(numberParam(url,"limit",100,1,1000))
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/liquidity-capacity") {
     const lane = normalizeOpportunityLane(url.searchParams.get("lane"));
     json(res,200,await getLiquidityCapacity(
@@ -2065,6 +2081,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
       strategyPolicy: "/api/strategy-policy",
       liquidityCapacity: "/api/liquidity-capacity?lane=urgent_2h&limit=100",
+      paperTrading: "/api/paper-trading?limit=100",
       calibrationHealth: "/api/calibration-health",
       historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
       opportunities: "/api/opportunities?minutes=120&limit=50",
@@ -2187,6 +2204,8 @@ let quoteCompactionRunning = false;
 let historicalBackfillRunning = false;
 let walletIntelligenceRunning = false;
 let maintenanceRunning = false;
+let paperEntryRunning = false;
+let paperSettlementRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
 const STRUCTURAL_SCAN_SECONDS = Math.max(900, Number(process.env.STRUCTURAL_SCAN_SECONDS || 1800));
 const PERSIST_SCAN_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_SCAN_SECONDS || 300));
@@ -2210,6 +2229,11 @@ const OPPORTUNITY_PACKET_RETENTION_DAYS = Math.max(7, Number(process.env.OPPORTU
 const QUOTE_BAR_1M_RETENTION_DAYS = Math.max(3, Number(process.env.QUOTE_BAR_1M_RETENTION_DAYS || 21));
 const CROSS_VENUE_RETENTION_DAYS = Math.max(7, Number(process.env.CROSS_VENUE_RETENTION_DAYS || 30));
 const SNAPSHOT_KEEP_COUNT = Math.max(2, Number(process.env.SNAPSHOT_KEEP_COUNT || 10));
+const PAPER_TRADING_ENABLED = String(process.env.PAPER_TRADING_ENABLED || "false").toLowerCase() === "true";
+const PAPER_TRADING_SECONDS = Math.max(60, Number(process.env.PAPER_TRADING_SECONDS || 300));
+const PAPER_TRADE_STAKE_USD = Math.max(1, Math.min(100, Number(process.env.PAPER_TRADE_STAKE_USD || 25)));
+const PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE =
+  String(process.env.PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE || "true").toLowerCase() !== "false";
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -2497,6 +2521,170 @@ async function runMaintenanceWorker() {
     }));
   } finally {
     maintenanceRunning = false;
+  }
+}
+
+function paperFeeRate(domain:string) {
+  if (domain === "crypto") return 0.07;
+  if (domain === "sports" || domain === "weather" || domain === "other") return 0.05;
+  return 0;
+}
+
+async function runPaperEntryWorker() {
+  if (!PAPER_TRADING_ENABLED || paperEntryRunning) return;
+  paperEntryRunning = true;
+  try {
+    const policy = await getProductionStrategyPolicy(true) as any;
+    if (PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE && policy?.calibration?.complete !== true) {
+      console.log(JSON.stringify({
+        level:"info",
+        message:"paper_trade_entry_skipped",
+        reason:"causal_v2_rebuild_incomplete",
+        calibration:policy?.calibration || null,
+        at:new Date().toISOString()
+      }));
+      return;
+    }
+
+    const latest = await getLatestMultiHorizonSnapshot();
+    if (!latest) return;
+    const candidates:ScanCandidate[] = latest.lanes?.urgent2h?.candidates || [];
+    let inserted=0;
+    let considered=0;
+
+    for (const candidate of candidates) {
+      if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) continue;
+      if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) continue;
+      const domain=strategyDomainForCategory(candidate.primaryCategory);
+      if (domain === "political") continue;
+
+      const researchPolicy=policy?.perDomain?.[domain]?.sampleWalkForward;
+      const selected=researchPolicy?.selectedPolicy;
+      if (!selected) continue;
+      const threshold=Number(selected.threshold);
+      if (!(threshold >= 0.5 && threshold < 1)) continue;
+
+      const p0=Number(candidate.displayedOutcomePrices?.[0]);
+      if (!(p0 > 0 && p0 < 1)) continue;
+      let outcomeIndex=-1;
+      if (p0 >= threshold) outcomeIndex=0;
+      else if (p0 <= 1-threshold) outcomeIndex=1;
+      if (outcomeIndex < 0) continue;
+
+      const book=candidate.books?.find(b=>b.tokenId===candidate.tokenIds[outcomeIndex])
+        || candidate.books?.[outcomeIndex];
+      if (!book) continue;
+      const execution=(book.executions || [])
+        .filter(e=>Number(e.fillPct||0)>=99.5 && Number(e.budgetUsd||0)>=PAPER_TRADE_STAKE_USD)
+        .sort((a,b)=>Number(a.budgetUsd)-Number(b.budgetUsd))[0]
+        || (book.executions || [])
+          .filter(e=>Number(e.fillPct||0)>=99.5)
+          .sort((a,b)=>Number(b.budgetUsd)-Number(a.budgetUsd))[0];
+      if (!execution || execution.avgFillPrice == null) continue;
+
+      const stake=Math.min(PAPER_TRADE_STAKE_USD,Number(execution.spendableUsd||execution.budgetUsd||0));
+      if (!(stake > 0)) continue;
+      considered += 1;
+
+      const result=await createPaperTrade({
+        strategyId:`sample_walk_forward_${domain}_tMinus60m`,
+        calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
+        conditionId:candidate.conditionId,
+        marketId:candidate.id,
+        slug:candidate.slug,
+        question:candidate.question,
+        domain,
+        outcome:candidate.outcomes[outcomeIndex],
+        tokenId:candidate.tokenIds[outcomeIndex],
+        entryAt:new Date().toISOString(),
+        expectedResolutionAt:candidate.endDate,
+        entryPrice:Number(execution.avgFillPrice),
+        stakeUsd:stake,
+        expectedEdgeBps:Number(selected.minEdgeBps ?? 0),
+        expectedRoiPct:Number(researchPolicy?.holdout?.roiPct ?? 0),
+        feeRate:paperFeeRate(domain),
+        policySnapshot:{
+          selectedPolicy:selected,
+          researchDeployable:researchPolicy?.deployable === true,
+          productionDomainEnabled:policy?.perDomain?.[domain]?.enabled === true,
+          calibration:policy?.calibration || null
+        },
+        marketSnapshot:{
+          minutesRemaining:candidate.minutesRemaining,
+          displayedOutcomePrices:candidate.displayedOutcomePrices,
+          bestAsk:book.bestAsk,
+          avgFillPrice:execution.avgFillPrice,
+          fillPct:execution.fillPct,
+          liquidityUsd:candidate.liquidityUsd,
+          volume24hUsd:candidate.volume24hUsd
+        }
+      });
+      if ((result as any)?.inserted) inserted += 1;
+    }
+
+    console.log(JSON.stringify({
+      level:"info",
+      message:"paper_trade_entries",
+      considered,
+      inserted,
+      stakeUsd:PAPER_TRADE_STAKE_USD,
+      at:new Date().toISOString()
+    }));
+  } catch(error) {
+    console.error(JSON.stringify({
+      level:"error",
+      message:"paper_trade_entry_failed",
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+  } finally {
+    paperEntryRunning=false;
+  }
+}
+
+async function runPaperSettlementWorker() {
+  if (!PAPER_TRADING_ENABLED || paperSettlementRunning) return;
+  paperSettlementRunning=true;
+  try {
+    const open=await getOpenPaperTrades(500);
+    let resolved=0;
+    for(const trade of open as any[]) {
+      if (!trade.slug) continue;
+      const expectedTs=trade.expectedResolutionAt ? Date.parse(trade.expectedResolutionAt) : NaN;
+      if (Number.isFinite(expectedTs) && Date.now() < expectedTs) continue;
+      const market=await getMarketBySlug(String(trade.slug)).catch(()=>null);
+      if(!market) continue;
+      const resolution=inferFinalResolution(market);
+      if(!resolution) continue;
+      const winning=String(resolution.winningOutcome || "");
+      const chosen=String(trade.outcome || "");
+      const won=winning.trim().toLowerCase() === chosen.trim().toLowerCase();
+      await settlePaperTrade({
+        id:trade.id,
+        winningOutcome:winning || null,
+        resolvedAt:new Date().toISOString(),
+        won
+      });
+      resolved += 1;
+    }
+    if(open.length || resolved){
+      console.log(JSON.stringify({
+        level:"info",
+        message:"paper_trade_settlement",
+        checked:open.length,
+        resolved,
+        at:new Date().toISOString()
+      }));
+    }
+  } catch(error) {
+    console.error(JSON.stringify({
+      level:"error",
+      message:"paper_trade_settlement_failed",
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+  } finally {
+    paperSettlementRunning=false;
   }
 }
 
@@ -2861,6 +3049,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       runBackgroundScan().catch(() => {});
     }, BACKGROUND_SCAN_SECONDS * 1000).unref();
 
+    runPaperEntryWorker().catch(() => {});
+    setInterval(() => {
+      runPaperEntryWorker().catch(() => {});
+    }, PAPER_TRADING_SECONDS * 1000).unref();
+
     setTimeout(() => runStructuralScan().catch(() => {}), 15_000).unref();
     setInterval(() => {
       runStructuralScan().catch(() => {});
@@ -2882,6 +3075,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     setInterval(() => {
       runWalletIntelligenceWorker().catch(() => {});
     }, WALLET_INTELLIGENCE_SECONDS * 1000).unref();
+
+    runPaperSettlementWorker().catch(() => {});
+    setInterval(() => {
+      runPaperSettlementWorker().catch(() => {});
+    }, PAPER_TRADING_SECONDS * 1000).unref();
   }
 
   if (ROLE_MAINTENANCE) {
