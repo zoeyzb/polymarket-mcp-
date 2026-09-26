@@ -2746,10 +2746,8 @@ export async function voidNonProductionOpenPaperTrades(enabledDomains: string[])
                'voidedAt',now()
              )
        where status='OPEN'
-         and (
-           not (coalesce(domain,'') = any($1::text[]))
-           or strategy_id not like 'calendar_walk_forward_%'
-         )`,
+         and strategy_id like 'calendar_walk_forward_%'
+         and not (coalesce(domain,'') = any($1::text[]))`,
     [allowed]
   );
   return { configured:true, voided:result.rowCount ?? 0, enabledDomains:allowed };
@@ -2771,6 +2769,7 @@ export async function voidInvalidOpenPaperTrades(minExpectedRoiPct = 0.25) {
                'minExpectedRoiPct',$1
              )
        where status='OPEN'
+         and strategy_id like 'calendar_walk_forward_%'
          and coalesce(expected_roi_pct, -999999) < $1`,
     [threshold]
   );
@@ -2944,6 +2943,36 @@ export async function getPaperTradingStats() {
       bestDayNetPnlUsd:
         dailyRow.bestDayNetPnlUsd == null ? null : Number(dailyRow.bestDayNetPnlUsd)
     }
+  };
+}
+
+export async function getPaperTradingStatsForStrategyPrefix(prefix:string) {
+  if(!pool) return {configured:false,reason:"not_configured"};
+  await ensurePaperTradingSchema();
+  const like=String(prefix||"").replace(/[%_]/g,match=>"\\\\%_".includes(match) ? "\\"+match : match)+"%";
+  const {rows}=await pool.query(`
+    select
+      count(*) filter (where status <> 'VOID')::int as "trades",
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd"
+    from polymarket_brain.paper_trades
+    where strategy_id like $1 escape '\\'
+  `,[like]);
+  const row=rows[0]||{};
+  const resolved=Number(row.wins||0)+Number(row.losses||0);
+  const stake=Number(row.resolvedStakeUsd||0);
+  const net=Number(row.netPnlUsd||0);
+  return {
+    configured:true,
+    strategyPrefix:prefix,
+    ...row,
+    resolvedTrades:resolved,
+    winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+    aggregateRoiPct:stake>0 ? Number(((net/stake)*100).toFixed(3)) : null
   };
 }
 
