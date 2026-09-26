@@ -26,8 +26,8 @@ export function selectObservationCandidates(
   const maxPrice=Math.max(minPrice,Math.min(0.999,Number(options?.maxPrice??0.99)));
 
   const seen=new Set<string>();
-  const familyCounts=new Map<MarketFamily,number>();
-  const rows:ObservationSelection[]=[];
+  const byFamily=new Map<MarketFamily,ObservationSelection[]>();
+  const familyOrder:MarketFamily[]=[];
 
   const ordered=[...candidates].sort((a,b)=>
     Number(a.minutesRemaining||0)-Number(b.minutesRemaining||0) ||
@@ -59,13 +59,28 @@ export function selectObservationCandidates(
     if(!condition || seen.has(key)) continue;
 
     const family=marketFamilyFromCandidate(candidate,"sports");
-    const count=familyCounts.get(family)||0;
-    if(count>=perFamilyLimit) continue;
+    const bucket=byFamily.get(family) || [];
+    if(bucket.length>=perFamilyLimit) continue;
 
     seen.add(key);
-    familyCounts.set(family,count+1);
-    rows.push({candidate,family,outcomeIndex,tokenId,displayedPrice});
-    if(rows.length>=limit) break;
+    if(!byFamily.has(family)) familyOrder.push(family);
+    bucket.push({candidate,family,outcomeIndex,tokenId,displayedPrice});
+    byFamily.set(family,bucket);
+  }
+
+  // Round-robin families so a burst of thousands of correlated props from one
+  // market family cannot crowd every other family out of the evidence ledger.
+  const rows:ObservationSelection[]=[];
+  for(let index=0;rows.length<limit;index++){
+    let added=false;
+    for(const family of familyOrder){
+      const row=byFamily.get(family)?.[index];
+      if(!row) continue;
+      rows.push(row);
+      added=true;
+      if(rows.length>=limit) break;
+    }
+    if(!added) break;
   }
 
   return rows;
