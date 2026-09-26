@@ -2013,39 +2013,34 @@ export async function persistMultiHorizonSnapshot(
   if (!pool) return { configured: false, reason: "not_configured" };
 
   const generatedAt = result.generatedAt || new Date().toISOString();
-  const { rowCount } = await pool.query(
-    `insert into polymarket_brain.multi_horizon_snapshots (
-       generated_at, total_active_markets, eligible_markets,
-       retained_candidates, scan_duration_ms, payload
-     ) values ($1,$2,$3,$4,$5,$6::jsonb)
-     on conflict (generated_at) do update set
-       total_active_markets = excluded.total_active_markets,
-       eligible_markets = excluded.eligible_markets,
-       retained_candidates = excluded.retained_candidates,
-       scan_duration_ms = excluded.scan_duration_ms,
-       payload = excluded.payload,
-       recorded_at = now()`,
-    [
-      generatedAt,
-      result.totalActiveMarketsScanned ?? null,
-      result.eligibleMarketsScanned ?? null,
-      result.retainedCandidateCount ?? null,
-      result.scanDurationMs ?? null,
-      JSON.stringify(result)
-    ]
-  );
-
-  await pool.query(
-    `delete from polymarket_brain.multi_horizon_snapshots
-     where generated_at < (
-       select generated_at
-       from polymarket_brain.multi_horizon_snapshots
-       order by generated_at desc
-       offset 9 limit 1
-     )`
-  ).catch(() => {});
-
-  return { configured: true, written: rowCount ?? 0, generatedAt };
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    // This table is current-state only. TRUNCATE releases prior large JSON/TOAST
+    // pages instead of accumulating dead tuples from repeated insert+delete cycles.
+    await client.query(`truncate table polymarket_brain.multi_horizon_snapshots`);
+    const inserted = await client.query(
+      `insert into polymarket_brain.multi_horizon_snapshots (
+         generated_at, total_active_markets, eligible_markets,
+         retained_candidates, scan_duration_ms, payload
+       ) values ($1,$2,$3,$4,$5,$6::jsonb)`,
+      [
+        generatedAt,
+        result.totalActiveMarketsScanned ?? null,
+        result.eligibleMarketsScanned ?? null,
+        result.retainedCandidateCount ?? null,
+        result.scanDurationMs ?? null,
+        JSON.stringify(result)
+      ]
+    );
+    await client.query("commit");
+    return { configured: true, written: inserted.rowCount ?? 0, generatedAt, retention:"current_state_only" };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getLatestMultiHorizonSnapshot() {
