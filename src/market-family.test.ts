@@ -15,6 +15,15 @@ describe("classifyMarketFamily", () => {
     expect(classifyMarketFamily({domain:"sports",question:"Will Team A score 3+ goals?",outcomeCount:2})).toBe("sports_threshold");
   });
 
+  it("classifies explicit O/U lines as totals even when upstream sports metadata is noisy", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Nantong Zhiyun vs. Changchun Yatai: O/U 6.5",
+      outcomeCount:2,
+      sportsKind:"score_band"
+    })).toBe("sports_total");
+  });
+
   it("keeps multi-outcome sports score markets in a sports family", () => {
     expect(classifyMarketFamily({
       domain:"sports",
