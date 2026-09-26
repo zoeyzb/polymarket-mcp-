@@ -148,8 +148,38 @@ function normalizeOpportunityLane(value: string | null): OpportunityLane {
     : "urgent_2h";
 }
 
+async function getPaperTradingApiSnapshot(limit:number) {
+  const bounded=Math.max(1,Math.min(1000,limit));
+  if (
+    paperTradingApiCache &&
+    paperTradingApiCache.limit===bounded &&
+    Date.now()-paperTradingApiCache.at<PAPER_TRADING_API_CACHE_MS
+  ) return paperTradingApiCache.value;
+  if (paperTradingApiPromise) return paperTradingApiPromise;
+  paperTradingApiPromise=(async()=>{
+    const [stats,trades]=await Promise.all([
+      getPaperTradingStats(),
+      listPaperTrades(bounded)
+    ]);
+    const value={
+      enabled:PAPER_TRADING_ENABLED,
+      requireCausalV2Complete:PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE,
+      stakeUsd:PAPER_TRADE_STAKE_USD,
+      stats,
+      trades
+    };
+    paperTradingApiCache={at:Date.now(),limit:bounded,value};
+    return value;
+  })().finally(()=>{ paperTradingApiPromise=null; });
+  return paperTradingApiPromise;
+}
+
 let strategyPolicyCache: { at:number; value:any } | null = null;
+let strategyPolicyRefreshPromise: Promise<any> | null = null;
 const STRATEGY_POLICY_CACHE_MS = Math.max(30_000, Number(process.env.STRATEGY_POLICY_CACHE_MS || 300_000));
+let paperTradingApiCache: { at:number; limit:number; value:any } | null = null;
+let paperTradingApiPromise: Promise<any> | null = null;
+const PAPER_TRADING_API_CACHE_MS = Math.max(5_000, Number(process.env.PAPER_TRADING_API_CACHE_MS || 30_000));
 
 function strategyDomainForMarket(category: string | null | undefined, question: string | null | undefined = "", slug: string | null | undefined = "") {
   const value = String(category || "other").toLowerCase();
@@ -175,7 +205,7 @@ function strategyDomainForMarket(category: string | null | undefined, question: 
   return "other";
 }
 
-async function getProductionStrategyPolicy(force = false) {
+async function computeProductionStrategyPolicy(force = false) {
   if (!force && strategyPolicyCache && Date.now() - strategyPolicyCache.at < STRATEGY_POLICY_CACHE_MS) {
     return strategyPolicyCache.value;
   }
@@ -389,6 +419,17 @@ async function getProductionStrategyPolicy(force = false) {
   strategyPolicyCache = {at:Date.now(),value:policy};
   return policy;
 }
+
+async function getProductionStrategyPolicy(force = false) {
+  if (!force && strategyPolicyCache && Date.now() - strategyPolicyCache.at < STRATEGY_POLICY_CACHE_MS) {
+    return strategyPolicyCache.value;
+  }
+  if (strategyPolicyRefreshPromise) return strategyPolicyRefreshPromise;
+  strategyPolicyRefreshPromise=computeProductionStrategyPolicy(force)
+    .finally(()=>{ strategyPolicyRefreshPromise=null; });
+  return strategyPolicyRefreshPromise;
+}
+
 
 function candidateLiquidityCapacity(candidate: ScanCandidate) {
   const books = Array.isArray(candidate.books) ? candidate.books : [];
@@ -2320,13 +2361,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
   }
 
   if (url.pathname === "/api/paper-trading") {
-    json(res,200,{
-      enabled:PAPER_TRADING_ENABLED,
-      requireCausalV2Complete:PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE,
-      stakeUsd:PAPER_TRADE_STAKE_USD,
-      stats:await getPaperTradingStats(),
-      trades:await listPaperTrades(numberParam(url,"limit",100,1,1000))
-    });
+    json(res,200,await getPaperTradingApiSnapshot(numberParam(url,"limit",100,1,1000)));
     return true;
   }
 
