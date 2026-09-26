@@ -1849,6 +1849,8 @@ export async function getHistoricalReplaySamples(options?: {
   const { rows } = await pool.query(
     `select
        condition_id as "conditionId",
+       slug,
+       question,
        resolved_at as "resolvedAt",
        domain,
        actual_outcome0 as "actualOutcome0",
@@ -1864,6 +1866,8 @@ export async function getHistoricalReplaySamples(options?: {
 
   return rows.map(row => ({
     conditionId: String(row.conditionId),
+    slug: row.slug == null ? null : String(row.slug),
+    question: row.question == null ? "" : String(row.question),
     resolvedAt: new Date(row.resolvedAt).toISOString(),
     domain: String(row.domain),
     actualOutcome0: Number(row.actualOutcome0) === 1 ? 1 as const : 0 as const,
