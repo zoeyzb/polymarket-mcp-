@@ -1849,6 +1849,8 @@ export async function getHistoricalReplaySamples(options?: {
   const { rows } = await pool.query(
     `select
        condition_id as "conditionId",
+       slug,
+       question,
        resolved_at as "resolvedAt",
        domain,
        actual_outcome0 as "actualOutcome0",
@@ -1864,6 +1866,8 @@ export async function getHistoricalReplaySamples(options?: {
 
   return rows.map(row => ({
     conditionId: String(row.conditionId),
+    slug: row.slug == null ? null : String(row.slug),
+    question: row.question == null ? "" : String(row.question),
     resolvedAt: new Date(row.resolvedAt).toISOString(),
     domain: String(row.domain),
     actualOutcome0: Number(row.actualOutcome0) === 1 ? 1 as const : 0 as const,
@@ -2742,10 +2746,8 @@ export async function voidNonProductionOpenPaperTrades(enabledDomains: string[])
                'voidedAt',now()
              )
        where status='OPEN'
-         and (
-           not (coalesce(domain,'') = any($1::text[]))
-           or strategy_id not like 'calendar_walk_forward_%'
-         )`,
+         and strategy_id like 'calendar_walk_forward_%'
+         and not (coalesce(domain,'') = any($1::text[]))`,
     [allowed]
   );
   return { configured:true, voided:result.rowCount ?? 0, enabledDomains:allowed };
@@ -2767,6 +2769,7 @@ export async function voidInvalidOpenPaperTrades(minExpectedRoiPct = 0.25) {
                'minExpectedRoiPct',$1
              )
        where status='OPEN'
+         and strategy_id like 'calendar_walk_forward_%'
          and coalesce(expected_roi_pct, -999999) < $1`,
     [threshold]
   );
@@ -2867,7 +2870,7 @@ export async function settlePaperTrade(input:{
   return {configured:true,updated:true,netPnlUsd:net,realizedRoiPct:roi};
 }
 
-export async function getPaperTradingStats() {
+export async function getPaperTradingStats(strategyPrefix = "") {
   if(!pool) return {configured:false,reason:"not_configured"};
   await ensurePaperTradingSchema();
   const {rows}=await pool.query(`
@@ -2877,6 +2880,7 @@ export async function getPaperTradingStats() {
       count(*) filter (where status='OPEN')::int as "openTrades",
       count(*) filter (where status='WIN')::int as wins,
       count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
       coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd",
       coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd",
       avg(realized_roi_pct) filter (where status in ('WIN','LOSS'))::float8 as "avgTradeRoiPct",
@@ -2886,7 +2890,8 @@ export async function getPaperTradingStats() {
       max(entry_at) as "lastEntryAt",
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.paper_trades
-  `);
+    where ($1 = '' or strategy_id like $1)
+  `,[strategyPrefix ? strategyPrefix + '%' : '']);
   const daily = await pool.query(`
     with daily as (
       select
@@ -2896,6 +2901,7 @@ export async function getPaperTradingStats() {
         coalesce(sum(net_pnl_usd),0)::float8 as net_pnl_usd
       from polymarket_brain.paper_trades
       where status in ('WIN','LOSS')
+        and ($1 = '' or strategy_id like $1)
       group by 1
     )
     select
@@ -2908,7 +2914,7 @@ export async function getPaperTradingStats() {
       min(net_pnl_usd)::float8 as "worstDayNetPnlUsd",
       max(net_pnl_usd)::float8 as "bestDayNetPnlUsd"
     from daily
-  `);
+  `,[strategyPrefix ? strategyPrefix + '%' : '']);
 
   const row=rows[0]||{};
   const dailyRow=daily.rows[0]||{};
@@ -2940,6 +2946,100 @@ export async function getPaperTradingStats() {
       bestDayNetPnlUsd:
         dailyRow.bestDayNetPnlUsd == null ? null : Number(dailyRow.bestDayNetPnlUsd)
     }
+  };
+}
+
+export async function getPaperTradingConfidenceStats(strategyPrefix = "research_shadow_") {
+  if(!pool) return [];
+  await ensurePaperTradingSchema();
+  const like=String(strategyPrefix||"")+"%";
+  const {rows}=await pool.query(`
+    select
+      coalesce(nullif(policy_snapshot->>'confidenceBand',''),'legacy') as "confidenceBand",
+      count(*) filter (where status <> 'VOID')::int as trades,
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd",
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd"
+    from polymarket_brain.paper_trades
+    where strategy_id like $1
+    group by 1
+    order by "confidenceBand"
+  `,[like]);
+  return rows.map(row=>{
+    const resolved=Number(row.wins||0)+Number(row.losses||0);
+    const stake=Number(row.resolvedStakeUsd||0);
+    const net=Number(row.netPnlUsd||0);
+    return {
+      ...row,
+      resolvedTrades:resolved,
+      winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+      aggregateRoiPct:stake>0 ? Number(((net/stake)*100).toFixed(3)) : null
+    };
+  });
+}
+
+export async function getPaperTradingFamilyStats(strategyPrefix = "research_shadow_") {
+  if(!pool) return [];
+  await ensurePaperTradingSchema();
+  const like=String(strategyPrefix||"")+"%";
+  const {rows}=await pool.query(`
+    select
+      coalesce(nullif(policy_snapshot->>'marketFamily',''),'unknown') as family,
+      count(*) filter (where status <> 'VOID')::int as trades,
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd",
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd"
+    from polymarket_brain.paper_trades
+    where strategy_id like $1
+    group by 1
+    order by count(*) filter (where status <> 'VOID') desc, family
+  `,[like]);
+  return rows.map(row=>{
+    const resolved=Number(row.wins||0)+Number(row.losses||0);
+    const stake=Number(row.resolvedStakeUsd||0);
+    const net=Number(row.netPnlUsd||0);
+    return {
+      ...row,
+      resolvedTrades:resolved,
+      winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+      aggregateRoiPct:stake>0 ? Number(((net/stake)*100).toFixed(3)) : null
+    };
+  });
+}
+
+export async function getPaperTradingStatsForStrategyPrefix(prefix:string) {
+  if(!pool) return {configured:false,reason:"not_configured"};
+  await ensurePaperTradingSchema();
+  const like=String(prefix||"")+"%";
+  const {rows}=await pool.query(`
+    select
+      count(*) filter (where status <> 'VOID')::int as "trades",
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd"
+    from polymarket_brain.paper_trades
+    where strategy_id like $1
+  `,[like]);
+  const row=rows[0]||{};
+  const resolved=Number(row.wins||0)+Number(row.losses||0);
+  const stake=Number(row.resolvedStakeUsd||0);
+  const net=Number(row.netPnlUsd||0);
+  return {
+    configured:true,
+    strategyPrefix:prefix,
+    ...row,
+    resolvedTrades:resolved,
+    winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+    aggregateRoiPct:stake>0 ? Number(((net/stake)*100).toFixed(3)) : null
   };
 }
 

@@ -58,6 +58,8 @@ import {
   getWalletProfile,
   getTradeControlStats,
   getPaperTradingStats,
+  getPaperTradingFamilyStats,
+  getPaperTradingConfidenceStats,
   getOpenPaperTrades,
   listPaperTrades,
   createPaperTrade,
@@ -100,6 +102,9 @@ import type { NormalizedBook, ScanCandidate } from "./types.js";
 import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
 import { routeCandidateToValidatedHorizon, STRATEGY_HORIZONS, type StrategyHorizon } from "./horizon-routing.js";
 import { sizeBankrollTrade } from "./bankroll.js";
+import { computePaperPortfolioState } from "./paper-portfolio.js";
+import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
+import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -157,15 +162,44 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,trades]=await Promise.all([
+    const [stats,researchStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
+      getPaperTradingStats("calendar_walk_forward_"),
+      getPaperTradingStats("research_shadow_"),
       getPaperTradingStats(),
+      getPaperTradingFamilyStats("calendar_walk_forward_"),
+      getPaperTradingFamilyStats("research_shadow_"),
+      getPaperTradingConfidenceStats("research_shadow_"),
       listPaperTrades(bounded)
     ]);
+    const researchPortfolios=Object.fromEntries(
+      ["ultra_high","high","exploratory"].map(band=>{
+        const row=(researchConfidenceStats as any[]).find(item=>String(item.confidenceBand)===band) || {};
+        return [band,computePaperPortfolioState({
+          startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0),
+          openExposureUsd:Number(row.openExposureUsd || 0)
+        })];
+      })
+    );
+    const researchPortfolioCombined=computePaperPortfolioState({
+      startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD*3,
+      realizedNetPnlUsd:Number((researchStats as any)?.netPnlUsd || 0),
+      openExposureUsd:Number((researchStats as any)?.openExposureUsd || 0)
+    });
     const value={
       enabled:PAPER_TRADING_ENABLED,
+      researchShadowEnabled:RESEARCH_SHADOW_ENABLED,
       requireCausalV2Complete:PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE,
       stakeUsd:PAPER_TRADE_STAKE_USD,
+      researchStakeUsd:RESEARCH_SHADOW_STAKE_USD,
       stats,
+      researchStats,
+      combinedStats,
+      productionFamilyStats,
+      researchFamilyStats,
+      researchConfidenceStats,
+      researchPortfolios,
+      researchPortfolioCombined,
       trades
     };
     paperTradingApiCache={at:Date.now(),limit:bounded,value};
@@ -296,6 +330,20 @@ async function computeProductionStrategyPolicy(force = false) {
     domain,
     allSamples.filter(sample=>sample.domain===domain)
   ])) as Record<(typeof domains)[number],typeof allSamples>;
+
+  const minFamilySamples=Math.max(25,Number(process.env.MARKET_FAMILY_MIN_RESEARCH_SAMPLES || 25));
+  const familySamples=new Map<MarketFamily,typeof allSamples>();
+  for (const sample of allSamples) {
+    const family=classifyMarketFamily({
+      domain:sample.domain,
+      question:sample.question || "",
+      slug:sample.slug || null,
+      outcomeCount:2
+    });
+    const rows=familySamples.get(family) || [];
+    rows.push(sample);
+    familySamples.set(family,rows);
+  }
   const horizonReplays=domains.flatMap(domain => {
     const samples=samplesByDomain[domain];
     return STRATEGY_HORIZONS.map(horizon => ({
@@ -310,6 +358,24 @@ async function computeProductionStrategyPolicy(force = false) {
       })
     }));
   });
+
+  const familyReplays=[...familySamples.entries()]
+    .filter(([,samples])=>samples.length>=minFamilySamples)
+    .flatMap(([family,samples]) =>
+      STRATEGY_HORIZONS.map(horizon=>({
+        family,
+        domain:String(samples[0]?.domain || "other"),
+        horizon,
+        sampleCount:samples.length,
+        replay:buildHistoricalReplay(samples,{
+          years:3,
+          horizon,
+          threshold:0.9,
+          bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+          domains:[String(samples[0]?.domain || "other")]
+        })
+      }))
+    );
 
   const perDomain: Record<string, any> = {};
   let totalSamples = 0;
@@ -361,13 +427,72 @@ async function computeProductionStrategyPolicy(force = false) {
     const enabledHorizons=STRATEGY_HORIZONS.filter(horizon=>horizons[horizon]?.enabled===true);
     const sampleCount=Math.max(0,...domainRows.map(row=>Number((row.replay as any)?.sampleCount||0)));
     totalSamples += sampleCount;
+    const familyRows=familyReplays.filter(row=>row.domain===domain);
+    const families:Record<string,any>={};
+    for (const family of [...new Set(familyRows.map(row=>row.family))]) {
+      const rows=familyRows.filter(row=>row.family===family);
+      const familyHorizons:Record<string,any>={};
+      for (const row of rows) {
+        const replay=row.replay as any;
+        const calendarWalk=replay.calendarWalkForward as any;
+        const walk=replay.walkForward as any;
+        const calibrated=replay.calibrated as any;
+        const familyEnabled=calibrationComplete && calendarWalk?.deployable===true;
+        familyHorizons[row.horizon]={
+          enabled:familyEnabled,
+          deployable:familyEnabled,
+          sampleCount:replay.sampleCount,
+          reason:calendarWalk?.reason || "calendar_walk_forward_unavailable",
+          calendarWalkForward:{
+            deployable:familyEnabled,
+            selectedPolicy:calendarWalk?.selectedPolicy ?? null,
+            foldSummary:calendarWalk?.foldSummary ?? null,
+            holdout:calendarWalk?.holdout ?? null,
+            holdoutDaily:calendarWalk?.holdoutDaily ?? null,
+            bankrollSimulation:calendarWalk?.bankrollSimulation ?? null,
+            dailyGrowthScore:calendarWalk?.dailyGrowthScore ?? null,
+            diagnostics:calendarWalk?.diagnostics ?? null,
+            requirements:calendarWalk?.requirements ?? null
+          },
+          sampleWalkForward:{
+            deployable:walk?.deployable===true,
+            selectedPolicy:walk?.selectedPolicy ?? null,
+            foldSummary:walk?.foldSummary ?? null,
+            holdout:walk?.holdout ?? null,
+            holdoutDaily:walk?.holdoutDaily ?? null,
+            requirements:walk?.requirements ?? null
+          },
+          calibratedResearch:{
+            deployable:calibrated?.deployable===true,
+            validation:calibrated?.validation ?? null,
+            holdout:calibrated?.holdout ?? null,
+            reason:calibrated?.reason ?? null
+          }
+        };
+      }
+      const enabledFamilyHorizons=STRATEGY_HORIZONS.filter(horizon=>familyHorizons[horizon]?.enabled===true);
+      families[family]={
+        enabled:enabledFamilyHorizons.length>0,
+        enabledHorizons:enabledFamilyHorizons,
+        sampleCount:Math.max(0,...rows.map(row=>Number((row.replay as any)?.sampleCount||0))),
+        reason:enabledFamilyHorizons.length ? "validated_family_horizon_available" : "family_not_deployable",
+        horizons:familyHorizons
+      };
+    }
+
+    const enabledFamilyHorizonUnion=STRATEGY_HORIZONS.filter(horizon=>
+      Object.values(families).some((family:any)=>family?.horizons?.[horizon]?.enabled===true)
+    );
     perDomain[domain] = {
-      enabled:enabledHorizons.length>0,
-      enabledHorizons,
+      enabled:Object.values(families).some((family:any)=>family?.enabled===true),
+      enabledHorizons:enabledFamilyHorizonUnion,
+      enabledFamilies:Object.entries(families).filter(([,family]:any)=>family?.enabled===true).map(([family])=>family),
       sampleCount,
-      reason:enabledHorizons.length
-        ? "validated_horizon_available"
-        : compatibility?.reason || "no_validated_horizon",
+      minFamilySamples,
+      reason:Object.values(families).some((family:any)=>family?.enabled===true)
+        ? "validated_family_available"
+        : "no_validated_family",
+      families,
       horizons,
       calendarWalkForward:compatibility?.calendarWalkForward || {
         deployable:false,selectedPolicy:null,foldSummary:null,holdout:null,holdoutDaily:null,bankrollSimulation:null,dailyGrowthScore:null,diagnostics:null,requirements:null
@@ -2627,6 +2752,13 @@ const PAPER_DYNAMIC_SIZING_ENABLED = String(process.env.PAPER_DYNAMIC_SIZING_ENA
 const PAPER_SIM_BANKROLL_USD = Math.max(25, Number(process.env.PAPER_SIM_BANKROLL_USD || 100));
 const PAPER_MAX_TRADE_FRACTION = Math.max(0.01, Math.min(0.5, Number(process.env.PAPER_MAX_TRADE_FRACTION || 0.25)));
 const PAPER_MAX_EXPOSURE_FRACTION = Math.max(PAPER_MAX_TRADE_FRACTION, Math.min(1, Number(process.env.PAPER_MAX_EXPOSURE_FRACTION || 0.5)));
+const RESEARCH_SHADOW_ENABLED = String(process.env.RESEARCH_SHADOW_ENABLED || "true").toLowerCase() !== "false";
+const RESEARCH_SHADOW_BANKROLL_USD = Math.max(25, Number(process.env.RESEARCH_SHADOW_BANKROLL_USD || 100));
+const RESEARCH_SHADOW_STAKE_USD = Math.max(1, Math.min(25, Number(process.env.RESEARCH_SHADOW_STAKE_USD || 5)));
+const RESEARCH_SHADOW_MIN_PRICE = Math.max(0.5, Math.min(0.99, Number(process.env.RESEARCH_SHADOW_MIN_PRICE || 0.6)));
+const RESEARCH_SHADOW_MAX_PRICE = Math.max(RESEARCH_SHADOW_MIN_PRICE, Math.min(0.999, Number(process.env.RESEARCH_SHADOW_MAX_PRICE || 0.985)));
+const RESEARCH_SHADOW_MIN_LIQUIDITY_USD = Math.max(0, Number(process.env.RESEARCH_SHADOW_MIN_LIQUIDITY_USD || 250));
+const RESEARCH_SHADOW_MAX_OPEN_TRADES = Math.max(1, Math.min(100, Number(process.env.RESEARCH_SHADOW_MAX_OPEN_TRADES || 20)));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -2985,6 +3117,8 @@ async function runPaperEntryWorker() {
     let voidedHorizonMismatches = 0;
     const openForDomainAudit = await getOpenPaperTrades(500).catch(() => []);
     for (const trade of openForDomainAudit as any[]) {
+      const strategyId=String(trade.strategyId || "");
+      if (!strategyId.startsWith("calendar_walk_forward_")) continue;
       const correctedDomain = strategyDomainForMarket("", String(trade.question || ""), String(trade.slug || ""));
       const storedDomain = String(trade.domain || "other");
       if (correctedDomain !== "other" && correctedDomain !== storedDomain) {
@@ -3002,32 +3136,38 @@ async function runPaperEntryWorker() {
         continue;
       }
 
-      const strategyId=String(trade.strategyId || "");
-      if (!strategyId.startsWith("calendar_walk_forward_")) {
-        await voidPaperTrade(trade.id, "legacy_nonproduction_shadow_policy").catch(() => null);
-        continue;
-      }
       const horizonMatch=strategyId.match(/_(tMinus(?:15|30|60|120)m)$/);
       const storedHorizon=horizonMatch?.[1] as StrategyHorizon | undefined;
-      if (!storedHorizon || policy?.perDomain?.[effectiveDomain]?.horizons?.[storedHorizon]?.enabled !== true) {
+      const storedFamily=String(trade.policySnapshot?.marketFamily || "");
+      const storedFamilyPolicy=policy?.perDomain?.[effectiveDomain]?.families?.[storedFamily];
+      if (
+        !storedFamily ||
+        !storedHorizon ||
+        storedFamilyPolicy?.enabled !== true ||
+        storedFamilyPolicy?.horizons?.[storedHorizon]?.enabled !== true
+      ) {
         const result=await voidPaperTrade(
           trade.id,
-          storedHorizon
-            ? `production_horizon_disabled:${effectiveDomain}:${storedHorizon}`
-            : "unknown_or_legacy_horizon"
+          !storedFamily
+            ? "unknown_or_legacy_market_family"
+            : storedHorizon
+              ? `production_family_horizon_disabled:${effectiveDomain}:${storedFamily}:${storedHorizon}`
+              : "unknown_or_legacy_horizon"
         ).catch(() => null);
         if ((result as any)?.updated) voidedHorizonMismatches += 1;
       }
     }
 
     const currentOpenPaperTrades = await getOpenPaperTrades(500).catch(() => []);
-    let paperOpenExposureUsd=(currentOpenPaperTrades as any[]).reduce(
-      (sum,trade)=>{
-        const parsed=Number(trade.stakeUsd ?? trade.stake_usd ?? 0);
-        return sum+(Number.isFinite(parsed) ? Math.max(0,parsed) : 0);
-      },
-      0
-    );
+    let paperOpenExposureUsd=(currentOpenPaperTrades as any[])
+      .filter(trade=>String(trade.strategyId || "").startsWith("calendar_walk_forward_"))
+      .reduce(
+        (sum,trade)=>{
+          const parsed=Number(trade.stakeUsd ?? trade.stake_usd ?? 0);
+          return sum+(Number.isFinite(parsed) ? Math.max(0,parsed) : 0);
+        },
+        0
+      );
 
     const latest = await getLatestMultiHorizonSnapshot();
     if (!latest) return;
@@ -3045,20 +3185,22 @@ async function runPaperEntryWorker() {
       if (domain === "political") { reject("political_disabled"); continue; }
 
       const domainPolicy=policy?.perDomain?.[domain];
-      if (domainPolicy?.enabled !== true) { reject(`domain_disabled:${domain}`); continue; }
+      const family=marketFamilyFromCandidate(candidate,domain);
+      const familyPolicy=domainPolicy?.families?.[family];
+      if (familyPolicy?.enabled !== true) { reject(`family_disabled:${family}`); continue; }
       const route=routeCandidateToValidatedHorizon(
         candidate.minutesRemaining,
         Object.fromEntries(STRATEGY_HORIZONS.map(horizon=>[
           horizon,
           {
-            enabled:domainPolicy?.horizons?.[horizon]?.enabled === true,
-            deployable:domainPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
+            enabled:familyPolicy?.horizons?.[horizon]?.enabled === true,
+            deployable:familyPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
           }
         ])) as Partial<Record<StrategyHorizon,{enabled:boolean;deployable:boolean}>>,
         PAPER_TRADE_HORIZON_TOLERANCE_MINUTES
       );
-      if (!route) { reject("no_validated_horizon_in_tolerance"); continue; }
-      const horizonPolicy=domainPolicy?.horizons?.[route.horizon];
+      if (!route) { reject(`no_validated_family_horizon:${family}`); continue; }
+      const horizonPolicy=familyPolicy?.horizons?.[route.horizon];
       const productionPolicy=horizonPolicy?.calendarWalkForward;
       const selected=productionPolicy?.selectedPolicy;
       if (!selected || productionPolicy?.deployable !== true) { reject("production_policy_not_deployable"); continue; }
@@ -3132,7 +3274,7 @@ async function runPaperEntryWorker() {
       considered += 1;
 
       const result=await createPaperTrade({
-        strategyId:`calendar_walk_forward_${domain}_${route.horizon}`,
+        strategyId:`calendar_walk_forward_${domain}_${family}_${route.horizon}`,
         calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
         conditionId:candidate.conditionId,
         marketId:candidate.id,
@@ -3158,6 +3300,7 @@ async function runPaperEntryWorker() {
           holdoutTrades,
           productionDomainEnabled:true,
           routedHorizon:route,
+          marketFamily:family,
           dynamicSizingEnabled:PAPER_DYNAMIC_SIZING_ENABLED,
           liveCalibration,
           liveEvaluation,
@@ -3178,6 +3321,181 @@ async function runPaperEntryWorker() {
         inserted += 1;
         if (PAPER_DYNAMIC_SIZING_ENABLED) paperOpenExposureUsd += stake;
       }
+    }
+
+    let researchInserted=0;
+    let researchConsidered=0;
+    const researchRejected:Record<string,number>={};
+    if (RESEARCH_SHADOW_ENABLED) {
+      const researchOpen=(currentOpenPaperTrades as any[])
+        .filter(trade=>String(trade.strategyId || "").startsWith("research_shadow_"));
+      const confidenceRows=await getPaperTradingConfidenceStats("research_shadow_").catch(()=>[]) as any[];
+      const confidenceStates=new Map<ResearchConfidenceBand,{
+        openExposureUsd:number;
+        availableCashUsd:number;
+        openTrades:number;
+        realizedNetPnlUsd:number;
+      }>();
+      for (const band of ["ultra_high","high","exploratory"] as ResearchConfidenceBand[]) {
+        const row=confidenceRows.find(item=>String(item.confidenceBand)===band) || {};
+        const state=computePaperPortfolioState({
+          startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0),
+          openExposureUsd:Number(row.openExposureUsd || 0)
+        });
+        confidenceStates.set(band,{
+          openExposureUsd:state.openExposureUsd,
+          availableCashUsd:state.availableCashUsd,
+          openTrades:Number(row.openTrades || 0),
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0)
+        });
+      }
+      let researchOpenCount=researchOpen.length;
+
+      const researchCandidates=[...candidates]
+        .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
+        .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
+        .sort((a,b)=>{
+          const ap=Math.max(...(a.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+          const bp=Math.max(...(b.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+          return bp-ap || Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
+        });
+
+      for (const candidate of researchCandidates) {
+        if (Number(candidate.liquidityUsd || 0) < RESEARCH_SHADOW_MIN_LIQUIDITY_USD) {
+          researchRejected.low_liquidity=(researchRejected.low_liquidity||0)+1;
+          continue;
+        }
+
+        const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
+        const family=marketFamilyFromCandidate(candidate,domain);
+        const familyProductionEnabled=policy?.perDomain?.[domain]?.families?.[family]?.enabled===true;
+        if (familyProductionEnabled) {
+          researchRejected.production_family=(researchRejected.production_family||0)+1;
+          continue;
+        }
+
+        const prices=(candidate.displayedOutcomePrices || []).map(Number);
+        let outcomeIndex=-1;
+        let displayedPrice=-Infinity;
+        for (let index=0; index<prices.length; index++) {
+          const price=prices[index];
+          if (Number.isFinite(price) && price>displayedPrice) {
+            displayedPrice=price;
+            outcomeIndex=index;
+          }
+        }
+        if (
+          outcomeIndex<0 ||
+          displayedPrice<RESEARCH_SHADOW_MIN_PRICE ||
+          displayedPrice>RESEARCH_SHADOW_MAX_PRICE
+        ) {
+          researchRejected.price_band=(researchRejected.price_band||0)+1;
+          continue;
+        }
+
+        const tokenId=candidate.tokenIds[outcomeIndex];
+        const book=candidate.books?.find(book=>book.tokenId===tokenId) || candidate.books?.[outcomeIndex];
+        if (!book || !(Number(book.bestAsk)>0 && Number(book.bestAsk)<1)) {
+          researchRejected.missing_book=(researchRejected.missing_book||0)+1;
+          continue;
+        }
+        const entryPrice=Number(book.bestAsk);
+        if (entryPrice<RESEARCH_SHADOW_MIN_PRICE || entryPrice>RESEARCH_SHADOW_MAX_PRICE) {
+          researchRejected.ask_outside_band=(researchRejected.ask_outside_band||0)+1;
+          continue;
+        }
+        const confidenceBand=classifyResearchConfidenceBand(entryPrice);
+        if (!confidenceBand) {
+          researchRejected.no_confidence_band=(researchRejected.no_confidence_band||0)+1;
+          continue;
+        }
+        const confidenceState=confidenceStates.get(confidenceBand)!;
+        if (confidenceState.openTrades >= RESEARCH_SHADOW_MAX_OPEN_TRADES) {
+          researchRejected[`cohort_open_cap:${confidenceBand}`]=(researchRejected[`cohort_open_cap:${confidenceBand}`]||0)+1;
+          continue;
+        }
+        if (confidenceState.availableCashUsd < 1) {
+          researchRejected[`cohort_cash_exhausted:${confidenceBand}`]=(researchRejected[`cohort_cash_exhausted:${confidenceBand}`]||0)+1;
+          continue;
+        }
+
+        const stake=Math.min(
+          RESEARCH_SHADOW_STAKE_USD,
+          confidenceState.availableCashUsd,
+          RESEARCH_SHADOW_BANKROLL_USD*0.1
+        );
+        if (!(stake>0)) continue;
+        researchConsidered += 1;
+
+        const result=await createPaperTrade({
+          strategyId:`research_shadow_${confidenceBand}_${domain}_${family}`,
+          calibrationVersion:null,
+          conditionId:candidate.conditionId,
+          marketId:candidate.id,
+          slug:candidate.slug,
+          question:candidate.question,
+          domain,
+          outcome:candidate.outcomes[outcomeIndex],
+          tokenId,
+          entryAt:new Date().toISOString(),
+          expectedResolutionAt:candidate.endDate,
+          entryPrice,
+          stakeUsd:stake,
+          expectedEdgeBps:null,
+          expectedRoiPct:null,
+          feeRate:paperFeeRate(domain),
+          policySnapshot:{
+            lane:"research_shadow",
+            executable:false,
+            confidenceBand,
+            marketFamily:family,
+            reason:"family_not_production_validated",
+            minPrice:RESEARCH_SHADOW_MIN_PRICE,
+            maxPrice:RESEARCH_SHADOW_MAX_PRICE,
+            bankrollUsd:RESEARCH_SHADOW_BANKROLL_USD
+          },
+          marketSnapshot:{
+            minutesRemaining:candidate.minutesRemaining,
+            displayedOutcomePrices:candidate.displayedOutcomePrices,
+            chosenDisplayedPrice:displayedPrice,
+            bestAsk:entryPrice,
+            liquidityUsd:candidate.liquidityUsd,
+            volume24hUsd:candidate.volume24hUsd,
+            outcomeCount:candidate.outcomes.length
+          }
+        });
+        if ((result as any)?.inserted) {
+          researchInserted += 1;
+          researchOpenCount += 1;
+          confidenceState.openTrades += 1;
+          confidenceState.openExposureUsd += stake;
+          confidenceState.availableCashUsd=Math.max(0,confidenceState.availableCashUsd-stake);
+        }
+      }
+
+      console.log(JSON.stringify({
+        level:"info",
+        message:"research_shadow_entries",
+        considered:researchConsidered,
+        inserted:researchInserted,
+        bankrollUsdPerCohort:RESEARCH_SHADOW_BANKROLL_USD,
+        cohorts:Object.fromEntries([...confidenceStates.entries()].map(([band,state])=>[
+          band,
+          {
+            openTrades:state.openTrades,
+            openExposureUsd:Number(state.openExposureUsd.toFixed(2)),
+            availableCashUsd:Number(state.availableCashUsd.toFixed(2)),
+            realizedNetPnlUsd:Number(state.realizedNetPnlUsd.toFixed(2))
+          }
+        ])),
+        openTrades:researchOpenCount,
+        stakeUsd:RESEARCH_SHADOW_STAKE_USD,
+        minPrice:RESEARCH_SHADOW_MIN_PRICE,
+        maxPrice:RESEARCH_SHADOW_MAX_PRICE,
+        rejected:researchRejected,
+        at:new Date().toISOString()
+      }));
     }
 
     console.log(JSON.stringify({
