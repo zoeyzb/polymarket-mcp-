@@ -2944,6 +2944,7 @@ async function runPaperEntryWorker() {
       .map(([domain]) => domain);
     const voidedNonProduction = await voidNonProductionOpenPaperTrades(enabledDomains);
     let voidedDomainMismatches = 0;
+    let voidedHorizonMismatches = 0;
     const openForDomainAudit = await getOpenPaperTrades(500).catch(() => []);
     for (const trade of openForDomainAudit as any[]) {
       const correctedDomain = strategyDomainForMarket("", String(trade.question || ""), String(trade.slug || ""));
@@ -2963,10 +2964,29 @@ async function runPaperEntryWorker() {
         continue;
       }
 
-      if (!String(trade.strategyId || "").startsWith("calendar_walk_forward_")) {
+      const strategyId=String(trade.strategyId || "");
+      if (!strategyId.startsWith("calendar_walk_forward_")) {
         await voidPaperTrade(trade.id, "legacy_nonproduction_shadow_policy").catch(() => null);
+        continue;
+      }
+      const horizonMatch=strategyId.match(/_(tMinus(?:15|30|60|120)m)$/);
+      const storedHorizon=horizonMatch?.[1] as StrategyHorizon | undefined;
+      if (!storedHorizon || policy?.perDomain?.[effectiveDomain]?.horizons?.[storedHorizon]?.enabled !== true) {
+        const result=await voidPaperTrade(
+          trade.id,
+          storedHorizon
+            ? `production_horizon_disabled:${effectiveDomain}:${storedHorizon}`
+            : "unknown_or_legacy_horizon"
+        ).catch(() => null);
+        if ((result as any)?.updated) voidedHorizonMismatches += 1;
       }
     }
+
+    const currentOpenPaperTrades = await getOpenPaperTrades(500).catch(() => []);
+    let paperOpenExposureUsd=(currentOpenPaperTrades as any[]).reduce(
+      (sum,trade)=>sum+Math.max(0,Number(trade.stakeUsd || 0)),
+      0
+    );
 
     const latest = await getLatestMultiHorizonSnapshot();
     if (!latest) return;
@@ -3058,8 +3078,8 @@ async function runPaperEntryWorker() {
       const sized=PAPER_DYNAMIC_SIZING_ENABLED
         ? sizeBankrollTrade({
             bankrollUsd:PAPER_SIM_BANKROLL_USD,
-            availableCashUsd:PAPER_SIM_BANKROLL_USD,
-            concurrentExposureUsd:0,
+            availableCashUsd:Math.max(0,PAPER_SIM_BANKROLL_USD-paperOpenExposureUsd),
+            concurrentExposureUsd:paperOpenExposureUsd,
             expectedEdgeBps:liveEvaluation.expectedEdgeBps,
             expectedNetRoiPct:liveEvaluation.expectedNetRoiPct,
             maxTradeFraction:PAPER_MAX_TRADE_FRACTION,
@@ -3113,7 +3133,10 @@ async function runPaperEntryWorker() {
           volume24hUsd:candidate.volume24hUsd
         }
       });
-      if ((result as any)?.inserted) inserted += 1;
+      if ((result as any)?.inserted) {
+        inserted += 1;
+        if (PAPER_DYNAMIC_SIZING_ENABLED) paperOpenExposureUsd += stake;
+      }
     }
 
     console.log(JSON.stringify({
@@ -3130,6 +3153,8 @@ async function runPaperEntryWorker() {
       voidedNonProductionOpenTrades:(voidedNonProduction as any)?.voided ?? 0,
       enabledProductionDomains:enabledDomains,
       voidedDomainMismatches,
+      voidedHorizonMismatches,
+      paperOpenExposureUsd:PAPER_DYNAMIC_SIZING_ENABLED ? paperOpenExposureUsd : null,
       positiveRoiGate:{
         minHoldoutRoiPct:PAPER_TRADE_MIN_HOLDOUT_ROI_PCT,
         minFoldRoiPct:PAPER_TRADE_MIN_FOLD_ROI_PCT,
