@@ -386,19 +386,21 @@ export async function cleanupRawStreams(
     candidateRetentionDays?: number;
     scanRetentionDays?: number;
     packetRetentionDays?: number;
-    oneMinuteBarRetentionDays?: number;
+    oneMinuteBarRetentionHours?: number;
+    fiveMinuteBarRetentionHours?: number;
     crossVenueRetentionDays?: number;
     snapshotKeepCount?: number;
   }
 ) {
   if (!pool) return { configured: false, reason: "not_configured" };
 
-  const quoteHours = Math.max(24, Math.min(720, quoteRetentionHours));
+  const quoteHours = Math.max(1, Math.min(168, quoteRetentionHours));
   const sportDays = Math.max(7, Math.min(365, sportsRetentionDays));
   const candidateDays = Math.max(3, Math.min(90, Number(options?.candidateRetentionDays ?? 14)));
   const scanDays = Math.max(3, Math.min(90, Number(options?.scanRetentionDays ?? 14)));
   const packetDays = Math.max(7, Math.min(180, Number(options?.packetRetentionDays ?? 30)));
-  const oneMinuteDays = Math.max(3, Math.min(90, Number(options?.oneMinuteBarRetentionDays ?? 21)));
+  const oneMinuteHours = Math.max(1, Math.min(72, Number(options?.oneMinuteBarRetentionHours ?? 6)));
+  const fiveMinuteHours = Math.max(6, Math.min(720, Number(options?.fiveMinuteBarRetentionHours ?? 48)));
   const crossVenueDays = Math.max(7, Math.min(180, Number(options?.crossVenueRetentionDays ?? 30)));
   const snapshotKeepCount = Math.max(2, Math.min(50, Number(options?.snapshotKeepCount ?? 10)));
   const startedAt = new Date().toISOString();
@@ -452,8 +454,14 @@ export async function cleanupRawStreams(
 
     const oneMinuteDelete = await pool.query(
       `delete from polymarket_brain.quote_bars_1m
-       where minute < now() - ($1 || ' days')::interval`,
-      [oneMinuteDays]
+       where minute < now() - ($1 || ' hours')::interval`,
+      [oneMinuteHours]
+    );
+
+    const fiveMinuteDelete = await pool.query(
+      `delete from polymarket_brain.quote_bars_5m
+       where bucket < now() - ($1 || ' hours')::interval`,
+      [fiveMinuteHours]
     );
 
     const snapshotDelete = await pool.query(
@@ -476,7 +484,8 @@ export async function cleanupRawStreams(
       candidateRetentionDays: candidateDays,
       scanRetentionDays: scanDays,
       packetRetentionDays: packetDays,
-      oneMinuteBarRetentionDays: oneMinuteDays,
+      oneMinuteBarRetentionHours: oneMinuteHours,
+      fiveMinuteBarRetentionHours: fiveMinuteHours,
       crossVenueRetentionDays: crossVenueDays,
       snapshotKeepCount,
       deletedRealtimeQuotes: quoteDelete.rowCount ?? 0,
@@ -487,6 +496,7 @@ export async function cleanupRawStreams(
       deletedOpportunityPackets: packetDelete.rowCount ?? 0,
       deletedCrossVenueMatches: crossVenueDelete.rowCount ?? 0,
       deletedQuoteBars1m: oneMinuteDelete.rowCount ?? 0,
+      deletedQuoteBars5m: fiveMinuteDelete.rowCount ?? 0,
       deletedSnapshots: snapshotDelete.rowCount ?? 0
     };
 
