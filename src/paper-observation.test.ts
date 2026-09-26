@@ -18,6 +18,19 @@ describe("sports observation ledger selection", () => {
     expect(rows.map(r=>r.family)).toEqual(["sports_total","sports_spread","sports_threshold"]);
   });
 
+  it("round-robins families when one urgent family dominates the input", () => {
+    const rows=selectObservationCandidates([
+      c("total-a","sports_total",0.93,1,1000),
+      c("total-b","sports_total",0.92,2,1000),
+      c("total-c","sports_total",0.91,3,1000),
+      c("spread-a","sports_spread",0.9,90,1000),
+      c("spread-b","sports_spread",0.89,91,1000)
+    ],{limit:4,perFamilyLimit:10});
+    expect(rows.map(r=>r.family)).toEqual([
+      "sports_total","sports_spread","sports_total","sports_spread"
+    ]);
+  });
+
   it("deduplicates condition and token and respects per-family caps", () => {
     const a=c("a","sports_total",0.9,60,1000);
     const duplicate={...a};
