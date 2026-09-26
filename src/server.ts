@@ -59,6 +59,7 @@ import {
   getTradeControlStats,
   getPaperTradingStats,
   getPaperTradingFamilyStats,
+  getPaperTradingConfidenceStats,
   getOpenPaperTrades,
   listPaperTrades,
   createPaperTrade,
@@ -102,6 +103,7 @@ import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
 import { routeCandidateToValidatedHorizon, STRATEGY_HORIZONS, type StrategyHorizon } from "./horizon-routing.js";
 import { sizeBankrollTrade } from "./bankroll.js";
 import { computePaperPortfolioState } from "./paper-portfolio.js";
+import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -160,12 +162,13 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,researchStats,combinedStats,productionFamilyStats,researchFamilyStats,trades]=await Promise.all([
+    const [stats,researchStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
       getPaperTradingStats("calendar_walk_forward_"),
       getPaperTradingStats("research_shadow_"),
       getPaperTradingStats(),
       getPaperTradingFamilyStats("calendar_walk_forward_"),
       getPaperTradingFamilyStats("research_shadow_"),
+      getPaperTradingConfidenceStats("research_shadow_"),
       listPaperTrades(bounded)
     ]);
     const researchPortfolio=computePaperPortfolioState({
@@ -184,6 +187,7 @@ async function getPaperTradingApiSnapshot(limit:number) {
       combinedStats,
       productionFamilyStats,
       researchFamilyStats,
+      researchConfidenceStats,
       researchPortfolio,
       trades
     };
@@ -2737,7 +2741,7 @@ const PAPER_MAX_EXPOSURE_FRACTION = Math.max(PAPER_MAX_TRADE_FRACTION, Math.min(
 const RESEARCH_SHADOW_ENABLED = String(process.env.RESEARCH_SHADOW_ENABLED || "true").toLowerCase() !== "false";
 const RESEARCH_SHADOW_BANKROLL_USD = Math.max(25, Number(process.env.RESEARCH_SHADOW_BANKROLL_USD || 100));
 const RESEARCH_SHADOW_STAKE_USD = Math.max(1, Math.min(25, Number(process.env.RESEARCH_SHADOW_STAKE_USD || 5)));
-const RESEARCH_SHADOW_MIN_PRICE = Math.max(0.5, Math.min(0.99, Number(process.env.RESEARCH_SHADOW_MIN_PRICE || 0.9)));
+const RESEARCH_SHADOW_MIN_PRICE = Math.max(0.5, Math.min(0.99, Number(process.env.RESEARCH_SHADOW_MIN_PRICE || 0.6)));
 const RESEARCH_SHADOW_MAX_PRICE = Math.max(RESEARCH_SHADOW_MIN_PRICE, Math.min(0.999, Number(process.env.RESEARCH_SHADOW_MAX_PRICE || 0.985)));
 const RESEARCH_SHADOW_MIN_LIQUIDITY_USD = Math.max(0, Number(process.env.RESEARCH_SHADOW_MIN_LIQUIDITY_USD || 250));
 const RESEARCH_SHADOW_MAX_OPEN_TRADES = Math.max(1, Math.min(100, Number(process.env.RESEARCH_SHADOW_MAX_OPEN_TRADES || 20)));
@@ -3311,15 +3315,27 @@ async function runPaperEntryWorker() {
     if (RESEARCH_SHADOW_ENABLED) {
       const researchOpen=(currentOpenPaperTrades as any[])
         .filter(trade=>String(trade.strategyId || "").startsWith("research_shadow_"));
-      const researchStats=await getPaperTradingStats("research_shadow_").catch(()=>null) as any;
-      let researchOpenExposureUsd=Math.max(0,Number(researchStats?.openExposureUsd || 0));
-      const realizedResearchPnlUsd=Number(researchStats?.netPnlUsd || 0);
-      const portfolioState=computePaperPortfolioState({
-        startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
-        realizedNetPnlUsd:realizedResearchPnlUsd,
-        openExposureUsd:researchOpenExposureUsd
-      });
-      let researchAvailableCashUsd=portfolioState.availableCashUsd;
+      const confidenceRows=await getPaperTradingConfidenceStats("research_shadow_").catch(()=>[]) as any[];
+      const confidenceStates=new Map<ResearchConfidenceBand,{
+        openExposureUsd:number;
+        availableCashUsd:number;
+        openTrades:number;
+        realizedNetPnlUsd:number;
+      }>();
+      for (const band of ["ultra_high","high","exploratory"] as ResearchConfidenceBand[]) {
+        const row=confidenceRows.find(item=>String(item.confidenceBand)===band) || {};
+        const state=computePaperPortfolioState({
+          startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0),
+          openExposureUsd:Number(row.openExposureUsd || 0)
+        });
+        confidenceStates.set(band,{
+          openExposureUsd:state.openExposureUsd,
+          availableCashUsd:state.availableCashUsd,
+          openTrades:Number(row.openTrades || 0),
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0)
+        });
+      }
       let researchOpenCount=researchOpen.length;
 
       const researchCandidates=[...candidates]
@@ -3332,8 +3348,6 @@ async function runPaperEntryWorker() {
         });
 
       for (const candidate of researchCandidates) {
-        if (researchOpenCount >= RESEARCH_SHADOW_MAX_OPEN_TRADES) break;
-        if (researchAvailableCashUsd < 1) break;
         if (Number(candidate.liquidityUsd || 0) < RESEARCH_SHADOW_MIN_LIQUIDITY_USD) {
           researchRejected.low_liquidity=(researchRejected.low_liquidity||0)+1;
           continue;
@@ -3377,17 +3391,31 @@ async function runPaperEntryWorker() {
           researchRejected.ask_outside_band=(researchRejected.ask_outside_band||0)+1;
           continue;
         }
+        const confidenceBand=classifyResearchConfidenceBand(entryPrice);
+        if (!confidenceBand) {
+          researchRejected.no_confidence_band=(researchRejected.no_confidence_band||0)+1;
+          continue;
+        }
+        const confidenceState=confidenceStates.get(confidenceBand)!;
+        if (confidenceState.openTrades >= RESEARCH_SHADOW_MAX_OPEN_TRADES) {
+          researchRejected[`cohort_open_cap:${confidenceBand}`]=(researchRejected[`cohort_open_cap:${confidenceBand}`]||0)+1;
+          continue;
+        }
+        if (confidenceState.availableCashUsd < 1) {
+          researchRejected[`cohort_cash_exhausted:${confidenceBand}`]=(researchRejected[`cohort_cash_exhausted:${confidenceBand}`]||0)+1;
+          continue;
+        }
 
         const stake=Math.min(
           RESEARCH_SHADOW_STAKE_USD,
-          researchAvailableCashUsd,
+          confidenceState.availableCashUsd,
           RESEARCH_SHADOW_BANKROLL_USD*0.1
         );
-        if (!(stake>0)) break;
+        if (!(stake>0)) continue;
         researchConsidered += 1;
 
         const result=await createPaperTrade({
-          strategyId:`research_shadow_${domain}_${family}`,
+          strategyId:`research_shadow_${confidenceBand}_${domain}_${family}`,
           calibrationVersion:null,
           conditionId:candidate.conditionId,
           marketId:candidate.id,
@@ -3406,6 +3434,7 @@ async function runPaperEntryWorker() {
           policySnapshot:{
             lane:"research_shadow",
             executable:false,
+            confidenceBand,
             marketFamily:family,
             reason:"family_not_production_validated",
             minPrice:RESEARCH_SHADOW_MIN_PRICE,
@@ -3425,8 +3454,9 @@ async function runPaperEntryWorker() {
         if ((result as any)?.inserted) {
           researchInserted += 1;
           researchOpenCount += 1;
-          researchOpenExposureUsd += stake;
-          researchAvailableCashUsd=Math.max(0,researchAvailableCashUsd-stake);
+          confidenceState.openTrades += 1;
+          confidenceState.openExposureUsd += stake;
+          confidenceState.availableCashUsd=Math.max(0,confidenceState.availableCashUsd-stake);
         }
       }
 
@@ -3435,9 +3465,16 @@ async function runPaperEntryWorker() {
         message:"research_shadow_entries",
         considered:researchConsidered,
         inserted:researchInserted,
-        bankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
-        availableCashUsd:Number(researchAvailableCashUsd.toFixed(2)),
-        openExposureUsd:Number(researchOpenExposureUsd.toFixed(2)),
+        bankrollUsdPerCohort:RESEARCH_SHADOW_BANKROLL_USD,
+        cohorts:Object.fromEntries([...confidenceStates.entries()].map(([band,state])=>[
+          band,
+          {
+            openTrades:state.openTrades,
+            openExposureUsd:Number(state.openExposureUsd.toFixed(2)),
+            availableCashUsd:Number(state.availableCashUsd.toFixed(2)),
+            realizedNetPnlUsd:Number(state.realizedNetPnlUsd.toFixed(2))
+          }
+        ])),
         openTrades:researchOpenCount,
         stakeUsd:RESEARCH_SHADOW_STAKE_USD,
         minPrice:RESEARCH_SHADOW_MIN_PRICE,
