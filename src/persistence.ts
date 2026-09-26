@@ -178,11 +178,42 @@ export async function persistScan(scan: ScanResult) {
   }
 }
 
+export function boundRealtimeQuotesForPersistence(
+  quotes: RealtimeQuote[],
+  requestedLimit = 400
+) {
+  const hardLimit = Math.max(
+    1,
+    Math.min(400, Math.floor(Number.isFinite(Number(requestedLimit)) ? Number(requestedLimit) : 400))
+  );
+  const latestByToken = new Map<string, RealtimeQuote>();
+
+  for (const quote of quotes) {
+    const tokenId = String(quote?.tokenId || "");
+    if (!tokenId) continue;
+    const current = latestByToken.get(tokenId);
+    const currentTs = current ? Date.parse(current.updatedAt) : Number.NEGATIVE_INFINITY;
+    const nextTs = Date.parse(quote.updatedAt);
+    if (!current || !Number.isFinite(currentTs) || (Number.isFinite(nextTs) && nextTs >= currentTs)) {
+      latestByToken.set(tokenId, quote);
+    }
+  }
+
+  return [...latestByToken.values()]
+    .sort((a, b) => {
+      const aTs = Date.parse(a.updatedAt);
+      const bTs = Date.parse(b.updatedAt);
+      return (Number.isFinite(bTs) ? bTs : 0) - (Number.isFinite(aTs) ? aTs : 0);
+    })
+    .slice(0, hardLimit);
+}
+
 export async function persistRealtimeQuotes(quotes: RealtimeQuote[]) {
   if (!pool) return { configured: false, reason: "not_configured", inserted: 0 };
   if (!quotes.length) return { configured: true, inserted: 0 };
 
-  const payload = quotes.slice(0, 2000).map(quote => ({
+  const configuredLimit = Number(process.env.REALTIME_PERSIST_ROW_LIMIT || 400);
+  const payload = boundRealtimeQuotesForPersistence(quotes, configuredLimit).map(quote => ({
     observed_at: quote.updatedAt,
     token_id: quote.tokenId,
     best_bid: quote.bestBid,
