@@ -63,6 +63,7 @@ import {
   createPaperTrade,
   settlePaperTrade,
   voidInvalidOpenPaperTrades,
+  voidNonProductionOpenPaperTrades,
   voidPaperTrade,
   listTradeIntents,
   createTradeIntent,
@@ -2864,6 +2865,10 @@ async function runPaperEntryWorker() {
     }
 
     const voided = await voidInvalidOpenPaperTrades(PAPER_TRADE_MIN_HOLDOUT_ROI_PCT).catch(() => null);
+    const enabledDomains = Object.entries(policy?.perDomain || {})
+      .filter(([,value]:any) => value?.enabled === true)
+      .map(([domain]) => domain);
+    const voidedNonProduction = await voidNonProductionOpenPaperTrades(enabledDomains);
     let voidedDomainMismatches = 0;
     const openForDomainAudit = await getOpenPaperTrades(500).catch(() => []);
     for (const trade of openForDomainAudit as any[]) {
