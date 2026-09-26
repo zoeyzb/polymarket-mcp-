@@ -606,7 +606,21 @@ async function validateTradeIntentPolicy(input:{
   if(domainPolicy?.enabled!==true) {
     return {ok:false as const,reason:domainPolicy?.reason || "directional_domain_gate_failed",domain,policy};
   }
-  return {ok:true as const,domain,candidate,policyType:"directional" as const,policy};
+  const route=routeCandidateToValidatedHorizon(
+    candidate.minutesRemaining,
+    Object.fromEntries(STRATEGY_HORIZONS.map(horizon=>[
+      horizon,
+      {
+        enabled:domainPolicy?.horizons?.[horizon]?.enabled === true,
+        deployable:domainPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
+      }
+    ])) as Partial<Record<StrategyHorizon,{enabled:boolean;deployable:boolean}>>,
+    PAPER_TRADE_HORIZON_TOLERANCE_MINUTES
+  );
+  if(!route) {
+    return {ok:false as const,reason:"no_validated_horizon_in_tolerance",domain,policy,candidate};
+  }
+  return {ok:true as const,domain,candidate,policyType:"directional" as const,policy,route};
 }
 
 async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
