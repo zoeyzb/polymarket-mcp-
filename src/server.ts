@@ -257,18 +257,26 @@ async function getProductionStrategyPolicy(force = false) {
     return policy;
   }
 
-  const horizonReplays = await Promise.all(domains.flatMap(domain =>
-    STRATEGY_HORIZONS.map(async horizon => {
-      const replay = await runHistoricalReplay({
+  const horizonReplayGroups = await Promise.all(domains.map(async domain => {
+    const samples=await getHistoricalReplaySamples({
+      years:3,
+      domains:[domain],
+      limit:100000,
+      calibrationVersion:HISTORICAL_CALIBRATION_VERSION
+    });
+    return STRATEGY_HORIZONS.map(horizon => ({
+      domain,
+      horizon,
+      replay:buildHistoricalReplay(samples,{
         years:3,
         horizon,
         threshold:0.9,
         bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
         domains:[domain]
-      });
-      return {domain,horizon,replay};
-    })
-  ));
+      })
+    }));
+  }));
+  const horizonReplays=horizonReplayGroups.flat();
 
   const perDomain: Record<string, any> = {};
   let totalSamples = 0;
@@ -649,23 +657,20 @@ async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
   };
 }
 
-async function runHistoricalReplay(options: {
-  years?: number;
-  horizon?: string;
-  threshold?: number;
-  trainFraction?: number;
-  bufferBps?: number;
-  domains?: string[];
-}) {
+function buildHistoricalReplay(
+  samples: Awaited<ReturnType<typeof getHistoricalReplaySamples>>,
+  options: {
+    years?: number;
+    horizon?: string;
+    threshold?: number;
+    trainFraction?: number;
+    bufferBps?: number;
+    domains?: string[];
+  }
+) {
   const years = Math.max(0.25, Math.min(10, Number(options.years ?? 3)));
   const horizon = options.horizon || "tMinus60m";
   const threshold = Math.max(0.5, Math.min(0.999, Number(options.threshold ?? 0.75)));
-  const samples = await getHistoricalReplaySamples({
-    years,
-    domains: options.domains,
-    limit: 100000,
-    calibrationVersion: HISTORICAL_CALIBRATION_VERSION
-  });
   return {
     years,
     calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
@@ -733,6 +738,24 @@ async function runHistoricalReplay(options: {
       minHoldoutProfitableDayPct: 90
     })
   };
+}
+
+async function runHistoricalReplay(options: {
+  years?: number;
+  horizon?: string;
+  threshold?: number;
+  trainFraction?: number;
+  bufferBps?: number;
+  domains?: string[];
+}) {
+  const years = Math.max(0.25, Math.min(10, Number(options.years ?? 3)));
+  const samples = await getHistoricalReplaySamples({
+    years,
+    domains: options.domains,
+    limit: 100000,
+    calibrationVersion: HISTORICAL_CALIBRATION_VERSION
+  });
+  return buildHistoricalReplay(samples,{...options,years});
 }
 
 function extractOpenAIText(payload: any): string {
