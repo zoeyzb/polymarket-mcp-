@@ -44,6 +44,7 @@ export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
   const scope=String(input.sportsScope||"").toLowerCase();
 
   if (domain==="sports") {
+    if (/\bO\/U\b|\bover\/under\b/i.test(question)) return "sports_total";
     if (kind==="moneyline" || kind==="series" || kind==="futures") return "sports_moneyline";
     if (kind==="spread") return "sports_spread";
     if (kind==="game_total" || kind==="period_total") return scope && !["full_game","match"].includes(scope) ? "sports_period" : "sports_total";
