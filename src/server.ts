@@ -304,7 +304,7 @@ async function computeProductionStrategyPolicy(force = false) {
     allSamples.filter(sample=>sample.domain===domain)
   ])) as Record<(typeof domains)[number],typeof allSamples>;
 
-  const minFamilySamples=Math.max(25,Number(process.env.MARKET_FAMILY_MIN_RESEARCH_SAMPLES || 75));
+  const minFamilySamples=Math.max(25,Number(process.env.MARKET_FAMILY_MIN_RESEARCH_SAMPLES || 25));
   const familySamples=new Map<MarketFamily,typeof allSamples>();
   for (const sample of allSamples) {
     const family=classifyMarketFamily({
