@@ -59,4 +59,13 @@ describe("bankroll simulation", () => {
     expect(strong.stakeUsd).toBeLessThanOrEqual(25);
     expect(strong.stakeUsd).toBeLessThanOrEqual(50);
   });
+  it("uses pre-settlement bankroll as the next UTC day's return base", () => {
+    const result = simulateBankroll([
+      { id:"overnight", entryAt:"2026-01-01T23:30:00Z", settleAt:"2026-01-02T00:30:00Z", requestedStakeUsd:100, returnMultiple:1.1 }
+    ], { startingBankrollUsd:100, maxTradeFraction:1, maxConcurrentExposureFraction:1, dailyLossLimitFraction:1 });
+
+    expect(result.bestDailyReturnPct).toBeCloseTo(10, 6);
+    expect(result.medianDailyReturnPct).toBeCloseTo(5, 6);
+  });
+
 });
