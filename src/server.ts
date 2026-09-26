@@ -2875,6 +2875,17 @@ async function runPaperEntryWorker() {
           `domain_routing_mismatch:${storedDomain}->${correctedDomain}`
         ).catch(() => null);
         if ((result as any)?.updated) voidedDomainMismatches += 1;
+        continue;
+      }
+
+      const effectiveDomain = correctedDomain !== "other" ? correctedDomain : storedDomain;
+      if (policy?.perDomain?.[effectiveDomain]?.enabled !== true) {
+        await voidPaperTrade(trade.id, `production_domain_disabled:${effectiveDomain}`).catch(() => null);
+        continue;
+      }
+
+      if (!String(trade.strategyId || "").startsWith("calendar_walk_forward_")) {
+        await voidPaperTrade(trade.id, "legacy_nonproduction_shadow_policy").catch(() => null);
       }
     }
 
