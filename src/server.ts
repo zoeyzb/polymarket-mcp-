@@ -109,8 +109,10 @@ import { buildResearchCandidateUniverse } from "./research-universe.js";
 import { chooseChampionCandidate, chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
 import { chooseGrowthCandidate, growthStakeUsd } from "./paper-growth-challenge.js";
 import { selectObservationCandidates } from "./paper-observation.js";
-import { createEphemeralPaperTrade, getEphemeralOpenTrades, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
+import { configureEphemeralPaperPersistence, createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperPersistenceStatus, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
+const PAPER_LAB_STATE_PATH = String(process.env.PAPER_LAB_STATE_PATH || "").trim();
+const PAPER_LAB_PERSISTENCE_BOOT = configureEphemeralPaperPersistence(PAPER_LAB_STATE_PATH || null);
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
 type ServiceRole = "all" | "api" | "scanner" | "streams" | "history" | "maintenance";
@@ -224,6 +226,7 @@ async function getPaperTradingApiSnapshot(limit:number) {
         note:"paper challenge targets, not forecasts or guarantees"
       },
       observationStats,
+      ephemeralPersistence:getEphemeralPaperPersistenceStatus(),
       combinedStats,
       productionFamilyStats,
       researchFamilyStats,
@@ -3138,6 +3141,14 @@ function paperFeeRate(domain:string) {
 
 async function runEphemeralResearchPaperWorker() {
   if (!RESEARCH_SHADOW_ENABLED) return;
+  if (PAPER_LAB_PERSISTENCE_BOOT.configured && getEphemeralPaperPersistenceStatus().lastError) {
+    console.warn(JSON.stringify({
+      level:"warn",
+      message:"paper_lab_persistence_degraded",
+      persistence:getEphemeralPaperPersistenceStatus(),
+      at:new Date().toISOString()
+    }));
+  }
   const latest=lastLiveMultiHorizonSnapshot;
   if (!latest) {
     console.log(JSON.stringify({
