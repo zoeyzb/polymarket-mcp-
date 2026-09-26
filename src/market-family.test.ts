@@ -39,6 +39,22 @@ describe("classifyMarketFamily", () => {
     })).toBe("sports_player_prop");
   });
 
+  it("does not mistake ISO dates in moneyline questions for score bands", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Will Vitesse Arnhem win on 2026-09-26?",
+      outcomeCount:2
+    })).toBe("sports_moneyline");
+  });
+
+  it("still recognizes semantic numeric score bands", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Will total goals be 2-3?",
+      outcomeCount:2
+    })).toBe("sports_score_band");
+  });
+
   it("recognizes non-sports threshold markets", () => {
     expect(classifyMarketFamily({domain:"crypto",question:"Will Bitcoin be above $100,000?",outcomeCount:2})).toBe("crypto_threshold");
     expect(classifyMarketFamily({domain:"weather",question:"Will temperature exceed 90 degrees?",outcomeCount:2})).toBe("weather_threshold");
