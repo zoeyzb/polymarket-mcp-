@@ -2117,10 +2117,27 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
 
   if (url.pathname === "/api/calibration-health") {
     const summary = await getHistoricalCalibrationSummary();
+    const minUsableCoveragePct = Math.max(
+      50,
+      Math.min(100, Number(process.env.CAUSAL_V2_MIN_USABLE_COVERAGE_PCT || 80))
+    );
+    const remaining = Number((summary as any)?.causalV2Remaining || 0);
+    const usableCoveragePct = Number((summary as any)?.causalV2UsableCoveragePct || 0);
+    const complete =
+      Number((summary as any)?.sampleCount || 0) > 0 &&
+      remaining === 0 &&
+      usableCoveragePct >= minUsableCoveragePct;
     json(res, 200, {
       ...summary,
       calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
-      complete: Number((summary as any)?.causalV2Remaining || 0) === 0
+      minUsableCoveragePct,
+      complete,
+      productionGateReady: complete,
+      status: complete
+        ? "ready_for_strategy_revalidation"
+        : remaining > 0
+          ? "rebuild_in_progress"
+          : "insufficient_usable_causal_coverage"
     });
     return true;
   }
