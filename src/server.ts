@@ -3370,11 +3370,15 @@ async function runEphemeralResearchPaperWorker() {
       });
     }
     if(entryPrice>=0.72 && entryPrice<=0.97){
+      const empirical=familyStats.get(family) as any;
       growthChoices.push({
         id:`${candidate.conditionId}:${tokenId}`,
         domain,family,entryPrice,
         liquidityUsd:Number(candidate.liquidityUsd||0),
         minutesRemaining:Number(candidate.minutesRemaining||0),
+        empiricalResolvedTrades:Number(empirical?.resolvedTrades||0),
+        empiricalWinRatePct:empirical?.winRatePct==null ? null : Number(empirical.winRatePct),
+        empiricalRoiPct:empirical?.aggregateRoiPct==null ? null : Number(empirical.aggregateRoiPct),
         candidate,outcomeIndex,tokenId
       });
     }
@@ -3498,7 +3502,9 @@ async function runEphemeralResearchPaperWorker() {
     );
     const pick=chooseGrowthCandidate(growthChoices,{
       excludedIds:growthOpenKeys,
-      excludedFamilies:growthOpenFamilies
+      excludedFamilies:growthOpenFamilies,
+      minEmpiricalSamples:20,
+      minEmpiricalWinRatePct:92
     });
     if(pick && Number(stats.openTrades||0)<GROWTH_PAPER_MAX_OPEN_TRADES){
       const choice=growthChoices.find(item=>item.id===pick.id);
@@ -3531,7 +3537,10 @@ async function runEphemeralResearchPaperWorker() {
           family:choice.family,
           entryPrice:choice.entryPrice,
           stakeUsd:stake,
-          minutesRemaining:choice.minutesRemaining
+          minutesRemaining:choice.minutesRemaining,
+          empiricalResolvedTrades:choice.empiricalResolvedTrades,
+          empiricalWinRatePct:choice.empiricalWinRatePct,
+          empiricalRoiPct:choice.empiricalRoiPct
         };
       }
     }
