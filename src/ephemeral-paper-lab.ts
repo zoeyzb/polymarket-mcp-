@@ -391,8 +391,11 @@ export function getEphemeralConfidenceStats(prefix="research_shadow_"){
 }
 
 
-export function getEphemeralFamilyStats(prefix="research_shadow_"){
-  const rows=prefix ? trades.filter(t=>t.strategyId.startsWith(prefix)) : [...trades];
+export function getEphemeralFamilyStats(prefix:string|string[]="research_shadow_"){
+  const prefixes=Array.isArray(prefix) ? prefix.filter(Boolean) : (prefix ? [prefix] : []);
+  const rows=prefixes.length
+    ? trades.filter(t=>prefixes.some(item=>t.strategyId.startsWith(item)))
+    : [...trades];
   const families=[...new Set(rows.map(t=>t.family).filter(Boolean))];
   return families.map(family=>{
     const familyRows=rows.filter(t=>t.family===family);
