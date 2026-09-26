@@ -2369,15 +2369,19 @@ const HISTORICAL_BACKFILL_WINDOW_DAYS = Math.max(1, Math.min(180, Number(process
 const HISTORICAL_BACKFILL_RUN_MINUTES = Math.max(1, Math.min(30, Number(process.env.HISTORICAL_BACKFILL_RUN_MINUTES || 25)));
 const WALLET_INTELLIGENCE_SECONDS = Math.max(120, Number(process.env.WALLET_INTELLIGENCE_SECONDS || 300));
 const WALLET_INTELLIGENCE_LIMIT = Math.max(5, Math.min(100, Number(process.env.WALLET_INTELLIGENCE_LIMIT || 25)));
-const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
-const RAW_QUOTE_RETENTION_HOURS = Math.max(24, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 72));
+const MAINTENANCE_SECONDS = Math.max(300, Number(process.env.MAINTENANCE_SECONDS || 600));
+const RAW_QUOTE_RETENTION_HOURS = Math.max(1, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 2));
 const SPORTS_EVENT_RETENTION_DAYS = Math.max(7, Number(process.env.SPORTS_EVENT_RETENTION_DAYS || 30));
 const CANDIDATE_RETENTION_DAYS = Math.max(3, Number(process.env.CANDIDATE_RETENTION_DAYS || 14));
 const SCAN_RETENTION_DAYS = Math.max(3, Number(process.env.SCAN_RETENTION_DAYS || 14));
 const OPPORTUNITY_PACKET_RETENTION_DAYS = Math.max(7, Number(process.env.OPPORTUNITY_PACKET_RETENTION_DAYS || 30));
-const QUOTE_BAR_1M_RETENTION_DAYS = Math.max(3, Number(process.env.QUOTE_BAR_1M_RETENTION_DAYS || 21));
+const QUOTE_BAR_1M_RETENTION_HOURS = Math.max(1, Number(process.env.QUOTE_BAR_1M_RETENTION_HOURS || 6));
+const QUOTE_BAR_5M_RETENTION_HOURS = Math.max(6, Number(process.env.QUOTE_BAR_5M_RETENTION_HOURS || 48));
 const CROSS_VENUE_RETENTION_DAYS = Math.max(7, Number(process.env.CROSS_VENUE_RETENTION_DAYS || 30));
 const SNAPSHOT_KEEP_COUNT = Math.max(2, Number(process.env.SNAPSHOT_KEEP_COUNT || 10));
+const REALTIME_TARGET_TOKEN_LIMIT = Math.max(100, Math.min(2000, Number(process.env.REALTIME_TARGET_TOKEN_LIMIT || 400)));
+const PERSIST_CANDIDATE_LIMIT = Math.max(50, Math.min(500, Number(process.env.PERSIST_CANDIDATE_LIMIT || 250)));
+const PERSIST_PACKET_LIMIT = Math.max(50, Math.min(500, Number(process.env.PERSIST_PACKET_LIMIT || 250)));
 const PAPER_TRADING_ENABLED = String(process.env.PAPER_TRADING_ENABLED || "false").toLowerCase() === "true";
 const PAPER_TRADING_SECONDS = Math.max(60, Number(process.env.PAPER_TRADING_SECONDS || 300));
 const PAPER_TRADE_STAKE_USD = Math.max(1, Math.min(100, Number(process.env.PAPER_TRADE_STAKE_USD || 25)));
@@ -2412,9 +2416,9 @@ async function runBackgroundScan() {
       maxMinutes: 1440,
       totalActiveMarketsScanned: multi.totalActiveMarketsScanned,
       totalInWindowBeforeFilters: multi.lanes.broader24h.totalInWindow,
-      returned: multi.lanes.broader24h.candidates.length,
+      returned: Math.min(PERSIST_CANDIDATE_LIMIT, multi.lanes.broader24h.candidates.length),
       scanDurationMs: multi.scanDurationMs,
-      candidates: multi.lanes.broader24h.candidates,
+      candidates: multi.lanes.broader24h.candidates.slice(0, PERSIST_CANDIDATE_LIMIT),
       eventBaskets: []
     };
 
@@ -2465,9 +2469,22 @@ async function runBackgroundScan() {
     });
 
     if (Date.now() - lastPacketPersistenceAt >= PERSIST_PACKET_SECONDS * 1000) {
+      const packetCandidateMap = new Map<string, (typeof multi.lanes.broader24h.candidates)[number]>();
+      for (const candidate of multi.structuralUniverse.binary) {
+        packetCandidateMap.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
+      }
+      for (const candidate of multi.lanes.urgent2h.candidates) {
+        if (packetCandidateMap.size >= PERSIST_PACKET_LIMIT) break;
+        packetCandidateMap.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
+      }
+      for (const candidate of multi.lanes.broader24h.candidates) {
+        if (packetCandidateMap.size >= PERSIST_PACKET_LIMIT) break;
+        packetCandidateMap.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
+      }
+
       await persistOpportunityPackets(
         multi.generatedAt,
-        [...alertCandidates.values()]
+        [...packetCandidateMap.values()].slice(0, PERSIST_PACKET_LIMIT)
       ).then(() => {
         lastPacketPersistenceAt = Date.now();
       }).catch(error => {
@@ -2483,15 +2500,25 @@ async function runBackgroundScan() {
     // Realtime subscriptions focus on <=6h markets plus any structural edge anywhere.
     // The 24h/full-universe lanes are still rescanned from fresh CLOB books each cycle.
     const tokens = new Set<string>();
-    for (const candidate of multi.lanes.developing6h.candidates) {
-      for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
-    }
-    for (const candidate of multi.structuralUniverse.binary) {
-      for (const tokenId of candidate.tokenIds) tokens.add(tokenId);
-    }
+    const addCandidateTokens = (candidates: ScanCandidate[], maxTokens: number) => {
+      for (const candidate of candidates) {
+        for (const tokenId of candidate.tokenIds) {
+          if (tokens.size >= maxTokens) return;
+          tokens.add(tokenId);
+        }
+      }
+    };
+    const urgentBudget = Math.max(50, Math.floor(REALTIME_TARGET_TOKEN_LIMIT * 0.75));
+    addCandidateTokens(multi.lanes.urgent2h.candidates, urgentBudget);
+    addCandidateTokens(multi.structuralUniverse.binary, REALTIME_TARGET_TOKEN_LIMIT);
     for (const basket of multi.structuralUniverse.eventBaskets) {
-      for (const tokenId of basket.yesTokenIds) tokens.add(tokenId);
+      for (const tokenId of basket.yesTokenIds) {
+        if (tokens.size >= REALTIME_TARGET_TOKEN_LIMIT) break;
+        tokens.add(tokenId);
+      }
+      if (tokens.size >= REALTIME_TARGET_TOKEN_LIMIT) break;
     }
+    addCandidateTokens(multi.lanes.developing6h.candidates, REALTIME_TARGET_TOKEN_LIMIT);
     await replaceRealtimeTargets(
       [...tokens],
       "multi_horizon_scanner",
@@ -2618,7 +2645,7 @@ async function runQuoteCompactionWorker() {
   if (quoteCompactionRunning) return;
   quoteCompactionRunning = true;
   try {
-    const result = await compactRealtimeQuotes(180);
+    const result = await compactRealtimeQuotes(120);
     if ((result.barsUpserted || 0) > 0) {
       console.log(JSON.stringify({
         level: "info",
@@ -2650,7 +2677,8 @@ async function runMaintenanceWorker() {
         candidateRetentionDays: CANDIDATE_RETENTION_DAYS,
         scanRetentionDays: SCAN_RETENTION_DAYS,
         packetRetentionDays: OPPORTUNITY_PACKET_RETENTION_DAYS,
-        oneMinuteBarRetentionDays: QUOTE_BAR_1M_RETENTION_DAYS,
+        oneMinuteBarRetentionHours: QUOTE_BAR_1M_RETENTION_HOURS,
+        fiveMinuteBarRetentionHours: QUOTE_BAR_5M_RETENTION_HOURS,
         crossVenueRetentionDays: CROSS_VENUE_RETENTION_DAYS,
         snapshotKeepCount: SNAPSHOT_KEEP_COUNT
       }
