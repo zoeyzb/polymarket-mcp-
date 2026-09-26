@@ -119,6 +119,30 @@ describe("sports market structure", () => {
     expect(result?.line).toBe(2.5);
   });
 
+  it("classifies participant corners O/U without game metadata", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "Slovakia vs. Moldova: Slovakia O/U 5.5 Corners",
+      sportsMarketType: "",
+      gameId: undefined,
+      events: [{ title: "International markets" }]
+    }));
+    expect(result?.kind).toBe("team_total");
+    expect(result?.subject).toBe("Slovakia");
+    expect(result?.stat).toBe("corners");
+    expect(result?.line).toBe(5.5);
+  });
+
+  it("does not let resolution boilerplate turn a dated moneyline into a score band", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "Will CA Acassuso win on 2026-09-27?",
+      sportsMarketType: "",
+      gameId: undefined,
+      description: "This market resolves based on the final score of the match.",
+      events: [{ title: "CA Acassuso vs. Sacachispas" }]
+    }));
+    expect(result?.kind).toBe("moneyline");
+  });
+
   it("classifies leading at halftime as a first-half moneyline", () => {
     const result = classifySportsMarketStructure(market({
       question: "Vitesse Arnhem leading at halftime?",
