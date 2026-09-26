@@ -58,6 +58,7 @@ import {
   getWalletProfile,
   getTradeControlStats,
   getPaperTradingStats,
+  getPaperTradingFamilyStats,
   getOpenPaperTrades,
   listPaperTrades,
   createPaperTrade,
@@ -100,6 +101,7 @@ import type { NormalizedBook, ScanCandidate } from "./types.js";
 import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
 import { routeCandidateToValidatedHorizon, STRATEGY_HORIZONS, type StrategyHorizon } from "./horizon-routing.js";
 import { sizeBankrollTrade } from "./bankroll.js";
+import { computePaperPortfolioState } from "./paper-portfolio.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -158,12 +160,19 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,researchStats,combinedStats,trades]=await Promise.all([
+    const [stats,researchStats,combinedStats,productionFamilyStats,researchFamilyStats,trades]=await Promise.all([
       getPaperTradingStats("calendar_walk_forward_"),
       getPaperTradingStats("research_shadow_"),
       getPaperTradingStats(),
+      getPaperTradingFamilyStats("calendar_walk_forward_"),
+      getPaperTradingFamilyStats("research_shadow_"),
       listPaperTrades(bounded)
     ]);
+    const researchPortfolio=computePaperPortfolioState({
+      startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+      realizedNetPnlUsd:Number((researchStats as any)?.netPnlUsd || 0),
+      openExposureUsd:Number((researchStats as any)?.openExposureUsd || 0)
+    });
     const value={
       enabled:PAPER_TRADING_ENABLED,
       researchShadowEnabled:RESEARCH_SHADOW_ENABLED,
@@ -173,6 +182,9 @@ async function getPaperTradingApiSnapshot(limit:number) {
       stats,
       researchStats,
       combinedStats,
+      productionFamilyStats,
+      researchFamilyStats,
+      researchPortfolio,
       trades
     };
     paperTradingApiCache={at:Date.now(),limit:bounded,value};
@@ -3302,10 +3314,12 @@ async function runPaperEntryWorker() {
       const researchStats=await getPaperTradingStats("research_shadow_").catch(()=>null) as any;
       let researchOpenExposureUsd=Math.max(0,Number(researchStats?.openExposureUsd || 0));
       const realizedResearchPnlUsd=Number(researchStats?.netPnlUsd || 0);
-      let researchAvailableCashUsd=Math.max(
-        0,
-        RESEARCH_SHADOW_BANKROLL_USD + (Number.isFinite(realizedResearchPnlUsd) ? realizedResearchPnlUsd : 0) - researchOpenExposureUsd
-      );
+      const portfolioState=computePaperPortfolioState({
+        startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+        realizedNetPnlUsd:realizedResearchPnlUsd,
+        openExposureUsd:researchOpenExposureUsd
+      });
+      let researchAvailableCashUsd=portfolioState.availableCashUsd;
       let researchOpenCount=researchOpen.length;
 
       const researchCandidates=[...candidates]
