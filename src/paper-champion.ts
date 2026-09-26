@@ -12,12 +12,17 @@ export function chooseChampionCandidate(candidates: ChampionCandidate[]): Champi
     .filter(candidate=>
       Number.isFinite(candidate.entryPrice) &&
       candidate.entryPrice>=0.8 &&
-      candidate.entryPrice<=0.985 &&
+      candidate.entryPrice<=0.97 &&
       Number(candidate.liquidityUsd||0)>0
     )
     .sort((a,b)=>{
       const sportsDelta=Number(b.domain==="sports")-Number(a.domain==="sports");
       if (sportsDelta) return sportsDelta;
+      const growthScore=(candidate:ChampionCandidate) =>
+        Math.pow(Number(candidate.entryPrice),10) *
+        Math.max(0,(1/Number(candidate.entryPrice))-1);
+      const growthDelta=growthScore(b)-growthScore(a);
+      if (growthDelta) return growthDelta;
       const confidenceDelta=Number(b.entryPrice)-Number(a.entryPrice);
       if (confidenceDelta) return confidenceDelta;
       const timeDelta=Number(a.minutesRemaining||0)-Number(b.minutesRemaining||0);
