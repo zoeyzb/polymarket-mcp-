@@ -39,8 +39,6 @@ function looksLikeHistoricalPlayerProp(question:string) {
 export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
   const domain=String(input.domain||"other").toLowerCase();
   const outcomeCount=Math.max(0,Number(input.outcomeCount||0));
-  if (outcomeCount > 2) return "multi_outcome";
-
   const question=[input.question,input.slug].filter(Boolean).join(" ");
   const kind=String(input.sportsKind||"").toLowerCase();
   const scope=String(input.sportsScope||"").toLowerCase();
@@ -54,6 +52,10 @@ export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
     if (kind==="threshold") return "sports_threshold";
     if (kind==="score_band" || kind==="exact_score") return "sports_score_band";
     if (kind.startsWith("period_")) return "sports_period";
+    if (outcomeCount > 2 && !kind) {
+      if (/\bexact score|correct score|score band|\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\b/i.test(question)) return "sports_score_band";
+      return "multi_outcome";
+    }
 
     if (/\bspread\b|handicap|[+-]\d+(?:\.\d+)?\b/.test(question)) return "sports_spread";
     if (/\bteam total\b/i.test(question)) return "sports_team_total";
@@ -65,6 +67,8 @@ export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
     if (/\bwin(?:ner)?\b|\bmoneyline\b|\bvs\.?\b|\bversus\b/i.test(question)) return "sports_moneyline";
     return "sports_other";
   }
+
+  if (outcomeCount > 2) return "multi_outcome";
 
   if (THRESHOLD_RE.test(question)) {
     if (domain==="crypto") return "crypto_threshold";

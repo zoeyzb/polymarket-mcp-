@@ -105,6 +105,8 @@ import { sizeBankrollTrade } from "./bankroll.js";
 import { computePaperPortfolioState } from "./paper-portfolio.js";
 import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
+import { buildResearchCandidateUniverse } from "./research-universe.js";
+import { chooseChampionCandidate, championStakeUsd } from "./paper-champion.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -162,9 +164,10 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,researchStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
+    const [stats,researchStats,championStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
       getPaperTradingStats("calendar_walk_forward_"),
       getPaperTradingStats("research_shadow_"),
+      getPaperTradingStats("champion_100_"),
       getPaperTradingStats(),
       getPaperTradingFamilyStats("calendar_walk_forward_"),
       getPaperTradingFamilyStats("research_shadow_"),
@@ -186,6 +189,11 @@ async function getPaperTradingApiSnapshot(limit:number) {
       realizedNetPnlUsd:Number((researchStats as any)?.netPnlUsd || 0),
       openExposureUsd:Number((researchStats as any)?.openExposureUsd || 0)
     });
+    const championPortfolio=computePaperPortfolioState({
+      startingBankrollUsd:CHAMPION_PAPER_BANKROLL_USD,
+      realizedNetPnlUsd:Number((championStats as any)?.netPnlUsd || 0),
+      openExposureUsd:Number((championStats as any)?.openExposureUsd || 0)
+    });
     const value={
       enabled:PAPER_TRADING_ENABLED,
       researchShadowEnabled:RESEARCH_SHADOW_ENABLED,
@@ -194,6 +202,9 @@ async function getPaperTradingApiSnapshot(limit:number) {
       researchStakeUsd:RESEARCH_SHADOW_STAKE_USD,
       stats,
       researchStats,
+      championPaperEnabled:CHAMPION_PAPER_ENABLED,
+      championStats,
+      championPortfolio,
       combinedStats,
       productionFamilyStats,
       researchFamilyStats,
@@ -2759,6 +2770,10 @@ const RESEARCH_SHADOW_MIN_PRICE = Math.max(0.5, Math.min(0.99, Number(process.en
 const RESEARCH_SHADOW_MAX_PRICE = Math.max(RESEARCH_SHADOW_MIN_PRICE, Math.min(0.999, Number(process.env.RESEARCH_SHADOW_MAX_PRICE || 0.985)));
 const RESEARCH_SHADOW_MIN_LIQUIDITY_USD = Math.max(0, Number(process.env.RESEARCH_SHADOW_MIN_LIQUIDITY_USD || 250));
 const RESEARCH_SHADOW_MAX_OPEN_TRADES = Math.max(1, Math.min(100, Number(process.env.RESEARCH_SHADOW_MAX_OPEN_TRADES || 20)));
+const CHAMPION_PAPER_ENABLED = String(process.env.CHAMPION_PAPER_ENABLED || "true").toLowerCase() !== "false";
+const CHAMPION_PAPER_BANKROLL_USD = 100;
+const CHAMPION_PAPER_MAX_STAKE_USD = Math.max(1, Math.min(25, Number(process.env.CHAMPION_PAPER_MAX_STAKE_USD || 10)));
+const CHAMPION_PAPER_MAX_OPEN_TRADES = Math.max(1, Math.min(10, Number(process.env.CHAMPION_PAPER_MAX_OPEN_TRADES || 4)));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -3352,14 +3367,30 @@ async function runPaperEntryWorker() {
       }
       let researchOpenCount=researchOpen.length;
 
-      const researchCandidates=[...candidates]
+      const researchCandidates=buildResearchCandidateUniverse(latest)
         .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
         .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
         .sort((a,b)=>{
+          const ad=strategyDomainForMarket(a.primaryCategory,a.question,a.slug);
+          const bd=strategyDomainForMarket(b.primaryCategory,b.question,b.slug);
+          const sportsDelta=Number(bd==="sports")-Number(ad==="sports");
+          if (sportsDelta) return sportsDelta;
           const ap=Math.max(...(a.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
           const bp=Math.max(...(b.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
           return bp-ap || Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
         });
+
+      const championChoices:Array<{
+        id:string;
+        domain:string;
+        family:string;
+        entryPrice:number;
+        liquidityUsd:number;
+        minutesRemaining:number;
+        candidate:ScanCandidate;
+        outcomeIndex:number;
+        tokenId:string;
+      }> = [];
 
       for (const candidate of researchCandidates) {
         if (Number(candidate.liquidityUsd || 0) < RESEARCH_SHADOW_MIN_LIQUIDITY_USD) {
@@ -3409,6 +3440,22 @@ async function runPaperEntryWorker() {
         if (!confidenceBand) {
           researchRejected.no_confidence_band=(researchRejected.no_confidence_band||0)+1;
           continue;
+        }
+        if (
+          CHAMPION_PAPER_ENABLED &&
+          (confidenceBand==="ultra_high" || confidenceBand==="high")
+        ) {
+          championChoices.push({
+            id:`${candidate.conditionId}:${tokenId}`,
+            domain,
+            family,
+            entryPrice,
+            liquidityUsd:Number(candidate.liquidityUsd||0),
+            minutesRemaining:Number(candidate.minutesRemaining||0),
+            candidate,
+            outcomeIndex,
+            tokenId
+          });
         }
         const confidenceState=confidenceStates.get(confidenceBand)!;
         if (confidenceState.openTrades >= RESEARCH_SHADOW_MAX_OPEN_TRADES) {
@@ -3462,7 +3509,8 @@ async function runPaperEntryWorker() {
             bestAsk:entryPrice,
             liquidityUsd:candidate.liquidityUsd,
             volume24hUsd:candidate.volume24hUsd,
-            outcomeCount:candidate.outcomes.length
+            outcomeCount:candidate.outcomes.length,
+            researchUniverse:"urgent2h+developing6h+broader24h+structural_binary"
           }
         });
         if ((result as any)?.inserted) {
@@ -3472,6 +3520,90 @@ async function runPaperEntryWorker() {
           confidenceState.openExposureUsd += stake;
           confidenceState.availableCashUsd=Math.max(0,confidenceState.availableCashUsd-stake);
         }
+      }
+
+      let championInserted=0;
+      let championDecision:any=null;
+      if (CHAMPION_PAPER_ENABLED) {
+        const championStats=await getPaperTradingStats("champion_100_").catch(()=>null) as any;
+        const championPortfolio=computePaperPortfolioState({
+          startingBankrollUsd:CHAMPION_PAPER_BANKROLL_USD,
+          realizedNetPnlUsd:Number(championStats?.netPnlUsd || 0),
+          openExposureUsd:Number(championStats?.openExposureUsd || 0)
+        });
+        const championPick=chooseChampionCandidate(championChoices);
+        if (
+          championPick &&
+          Number(championStats?.openTrades || 0) < CHAMPION_PAPER_MAX_OPEN_TRADES &&
+          championPortfolio.availableCashUsd > 0
+        ) {
+          const selectedChoice=championChoices.find(choice=>choice.id===championPick.id) || null;
+          if (selectedChoice) {
+            const stake=championStakeUsd({
+              currentBankrollUsd:championPortfolio.currentBankrollUsd,
+              availableCashUsd:championPortfolio.availableCashUsd,
+              maxStakeUsd:CHAMPION_PAPER_MAX_STAKE_USD
+            });
+            if (stake>0) {
+              const candidate=selectedChoice.candidate;
+              const result=await createPaperTrade({
+                strategyId:`champion_100_${selectedChoice.domain}_${selectedChoice.family}`,
+                calibrationVersion:null,
+                conditionId:candidate.conditionId,
+                marketId:candidate.id,
+                slug:candidate.slug,
+                question:candidate.question,
+                domain:selectedChoice.domain,
+                outcome:candidate.outcomes[selectedChoice.outcomeIndex],
+                tokenId:selectedChoice.tokenId,
+                entryAt:new Date().toISOString(),
+                expectedResolutionAt:candidate.endDate,
+                entryPrice:selectedChoice.entryPrice,
+                stakeUsd:stake,
+                expectedEdgeBps:null,
+                expectedRoiPct:null,
+                feeRate:paperFeeRate(selectedChoice.domain),
+                policySnapshot:{
+                  lane:"champion_100",
+                  executable:false,
+                  bankrollUsd:CHAMPION_PAPER_BANKROLL_USD,
+                  marketFamily:selectedChoice.family,
+                  sportsPriority:selectedChoice.domain==="sports",
+                  confidenceBand:classifyResearchConfidenceBand(selectedChoice.entryPrice),
+                  maxOpenTrades:CHAMPION_PAPER_MAX_OPEN_TRADES,
+                  maxStakeUsd:CHAMPION_PAPER_MAX_STAKE_USD
+                },
+                marketSnapshot:{
+                  minutesRemaining:candidate.minutesRemaining,
+                  displayedOutcomePrices:candidate.displayedOutcomePrices,
+                  chosenDisplayedPrice:selectedChoice.entryPrice,
+                  bestAsk:selectedChoice.entryPrice,
+                  liquidityUsd:candidate.liquidityUsd,
+                  volume24hUsd:candidate.volume24hUsd,
+                  outcomeCount:candidate.outcomes.length
+                }
+              });
+              championInserted=(result as any)?.inserted ? 1 : 0;
+              championDecision={
+                conditionId:candidate.conditionId,
+                domain:selectedChoice.domain,
+                family:selectedChoice.family,
+                entryPrice:selectedChoice.entryPrice,
+                stakeUsd:stake,
+                inserted:championInserted===1
+              };
+            }
+          }
+        }
+        console.log(JSON.stringify({
+          level:"info",
+          message:"champion_100_entry",
+          inserted:championInserted,
+          decision:championDecision,
+          bankrollBefore:championPortfolio,
+          candidates:championChoices.length,
+          at:new Date().toISOString()
+        }));
       }
 
       console.log(JSON.stringify({
@@ -3490,6 +3622,9 @@ async function runPaperEntryWorker() {
           }
         ])),
         openTrades:researchOpenCount,
+        candidateUniverse:researchCandidates.length,
+        sportsCandidates:researchCandidates.filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)==="sports").length,
+        multiOutcomeCandidates:researchCandidates.filter(candidate=>candidate.outcomes.length>2).length,
         stakeUsd:RESEARCH_SHADOW_STAKE_USD,
         minPrice:RESEARCH_SHADOW_MIN_PRICE,
         maxPrice:RESEARCH_SHADOW_MAX_PRICE,
