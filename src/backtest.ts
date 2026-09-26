@@ -1,3 +1,5 @@
+import { simulateBankroll } from "./bankroll.js";
+
 export interface HistoricalReplaySample {
   conditionId: string;
   resolvedAt: string;
@@ -86,6 +88,45 @@ export interface DailyPnlSummary {
     target100: number | null;
     target500: number | null;
     target1000: number | null;
+  };
+}
+
+export interface DailyGrowthScoreInput {
+  minRoiPct: number;
+  avgRoiPct: number;
+  totalTrades: number;
+  profitableDayPct: number;
+  medianDailyPnlPerDollar: number;
+  avgDailyPnlPerDollar: number;
+  worstDayPnlPerDollar: number;
+  maxDrawdownPerDollar: number;
+  peakConcurrentTrades: number;
+}
+
+export function scoreDailyGrowthPolicy(input: DailyGrowthScoreInput) {
+  const profitableDayReward=Math.max(0,input.profitableDayPct)*0.4;
+  const medianGrowthReward=input.medianDailyPnlPerDollar*100*3;
+  const averageGrowthReward=input.avgDailyPnlPerDollar*100;
+  const floorReward=input.minRoiPct*1.5;
+  const activityReward=Math.log1p(Math.max(0,input.totalTrades))*2;
+  const drawdownPenalty=Math.max(0,input.maxDrawdownPerDollar)*100*2;
+  const worstDayPenalty=Math.max(0,-input.worstDayPnlPerDollar)*100*4;
+  const concurrencyPenalty=Math.max(0,input.peakConcurrentTrades-3)*1.5;
+  const riskPenalty=drawdownPenalty+worstDayPenalty+concurrencyPenalty;
+  const score=profitableDayReward+medianGrowthReward+averageGrowthReward+floorReward+activityReward-riskPenalty;
+  return {
+    score:round(score,6),
+    components:{
+      profitableDayReward:round(profitableDayReward,6),
+      medianGrowthReward:round(medianGrowthReward,6),
+      averageGrowthReward:round(averageGrowthReward,6),
+      floorReward:round(floorReward,6),
+      activityReward:round(activityReward,6),
+      riskPenalty:round(riskPenalty,6),
+      drawdownPenalty:round(drawdownPenalty,6),
+      worstDayPenalty:round(worstDayPenalty,6),
+      concurrencyPenalty:round(concurrencyPenalty,6)
+    }
   };
 }
 
@@ -488,6 +529,48 @@ function dailyCalibratedSummary(
   );
 }
 
+function simulateCalibratedBankroll(
+  samples: HistoricalReplaySample[],
+  calibration: Map<string, CalibrationBin>,
+  options: {
+    horizon: string;
+    threshold: number;
+    minEdgeBps: number;
+    bufferBps: number;
+    binSize: number;
+    feeMode: "none" | "current_taker_schedule";
+  }
+) {
+  const holdMs=horizonMinutes(options.horizon)*60_000;
+  const trades=[];
+  for (const sample of samples) {
+    const trade=prepareTrade(sample,options.horizon,options.threshold);
+    if (!trade) continue;
+    const calibrated=calibration.get(binKey(trade.quotedPrice,options.binSize));
+    if (!calibrated) continue;
+    const executionPrice=Math.min(0.999999,trade.quotedPrice+options.bufferBps/10_000);
+    const expectedEdge=calibrated.calibratedWinProbability-executionPrice;
+    if (expectedEdge < options.minEdgeBps/10_000) continue;
+    const fee=takerFeePerDollarStake(sample,executionPrice,options.feeMode);
+    const net=(trade.didWin ? (1/executionPrice)-1 : -1)-fee;
+    const settleTs=Date.parse(sample.resolvedAt);
+    if (!Number.isFinite(settleTs)) continue;
+    trades.push({
+      id:sample.conditionId,
+      entryAt:new Date(settleTs-holdMs).toISOString(),
+      settleAt:new Date(settleTs).toISOString(),
+      requestedStakeUsd:100,
+      returnMultiple:Math.max(0,1+net)
+    });
+  }
+  return simulateBankroll(trades,{
+    startingBankrollUsd:100,
+    maxTradeFraction:0.25,
+    maxConcurrentExposureFraction:0.5,
+    dailyLossLimitFraction:0.2
+  });
+}
+
 function evaluateCalibrated(
   samples: HistoricalReplaySample[],
   calibration: Map<string, CalibrationBin>,
@@ -833,6 +916,7 @@ export function runCalendarWalkForwardEdgeBacktest(
     avgRoi:number;
     totalTrades:number;
     score:number;
+    dailyGrowthScore:ReturnType<typeof scoreDailyGrowthPolicy>;
   }> = [];
   const rejectedCandidates:Array<{
     threshold:number;
@@ -1004,9 +1088,27 @@ export function runCalendarWalkForwardEdgeBacktest(
       const rois=folds.map(f=>Number(f.roiPct||0));
       const minRoi=Math.min(...rois);
       const avgRoi=rois.reduce((a,b)=>a+b,0)/rois.length;
-      const totalTrades=folds.reduce((s,f)=>s+f.trades,0);
-      const score=minRoi*Math.sqrt(totalTrades)+avgRoi;
-      candidateResults.push({threshold,minEdgeBps,folds,abstainedFolds,minRoi,avgRoi,totalTrades,score});
+      const totalTrades=folds.reduce((sum,f)=>sum+f.trades,0);
+      const profitableDayPct=folds.reduce((sum,f)=>sum+Number(f.daily.profitableDayPct||0),0)/folds.length;
+      const dailyMedians=folds.map(f=>Number(f.daily.medianPnlPerDollarStakePerDay||0));
+      const medianDailyPnlPerDollar=Number(median(dailyMedians)||0);
+      const avgDailyPnlPerDollar=folds.reduce((sum,f)=>sum+Number(f.daily.avgPnlPerDollarStakePerDay||0),0)/folds.length;
+      const worstDayPnlPerDollar=Math.min(...folds.map(f=>Number(f.daily.worstDayPnlPerDollarStake||0)));
+      const maxDrawdownPerDollar=Math.max(...folds.map(f=>Number(f.maxDrawdownPerDollarStake||0)));
+      const peakConcurrentTrades=Math.max(...folds.map(f=>Number(f.daily.peakConcurrentTrades||0)));
+      const dailyGrowthScore=scoreDailyGrowthPolicy({
+        minRoiPct:minRoi,
+        avgRoiPct:avgRoi,
+        totalTrades,
+        profitableDayPct,
+        medianDailyPnlPerDollar,
+        avgDailyPnlPerDollar,
+        worstDayPnlPerDollar,
+        maxDrawdownPerDollar,
+        peakConcurrentTrades
+      });
+      const score=dailyGrowthScore.score;
+      candidateResults.push({threshold,minEdgeBps,folds,abstainedFolds,minRoi,avgRoi,totalTrades,score,dailyGrowthScore});
     }
   }
 
@@ -1066,6 +1168,14 @@ export function runCalendarWalkForwardEdgeBacktest(
     binSize,
     feeMode
   });
+  const bankrollSimulation=simulateCalibratedBankroll(holdoutSamples,finalCalibration,{
+    horizon:options.horizon,
+    threshold:selected.threshold,
+    minEdgeBps:selected.minEdgeBps,
+    bufferBps,
+    binSize,
+    feeMode
+  });
 
   const deployable =
     holdout.trades >= minHoldoutTrades &&
@@ -1100,6 +1210,8 @@ export function runCalendarWalkForwardEdgeBacktest(
     },
     holdout,
     holdoutDaily,
+    bankrollSimulation,
+    dailyGrowthScore:selected.dailyGrowthScore,
     deployable,
     reason:deployable ? "calendar_walk_forward_and_daily_gate_pass" : "calendar_holdout_or_daily_gate_failed",
     diagnostics,
@@ -1113,6 +1225,8 @@ export function runCalendarWalkForwardEdgeBacktest(
       "Calendar folds with too little strategy activity are treated as abstentions, not losses; at least the configured number of evaluable folds must clear ROI, hit-rate, and profitable-day floors.",
       "The final holdout is the most recent fixed calendar window and is not used for policy selection.",
       "Current Polymarket taker fees and the configured execution buffer are included.",
+      "Policy ranking favors daily consistency and drawdown-adjusted growth only after all hard gates pass.",
+      "The $100 bankroll replay caps per-trade and concurrent exposure and rejects entries when capital is unavailable.",
       "Historical performance does not guarantee future profitability."
     ]
   };
