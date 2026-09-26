@@ -257,13 +257,17 @@ async function getProductionStrategyPolicy(force = false) {
     return policy;
   }
 
-  const horizonReplayGroups = await Promise.all(domains.map(async domain => {
-    const samples=await getHistoricalReplaySamples({
-      years:3,
-      domains:[domain],
-      limit:100000,
-      calibrationVersion:HISTORICAL_CALIBRATION_VERSION
-    });
+  const allSamples=await getHistoricalReplaySamples({
+    years:3,
+    limit:100000,
+    calibrationVersion:HISTORICAL_CALIBRATION_VERSION
+  });
+  const samplesByDomain=Object.fromEntries(domains.map(domain=>[
+    domain,
+    allSamples.filter(sample=>sample.domain===domain)
+  ])) as Record<(typeof domains)[number],typeof allSamples>;
+  const horizonReplays=domains.flatMap(domain => {
+    const samples=samplesByDomain[domain];
     return STRATEGY_HORIZONS.map(horizon => ({
       domain,
       horizon,
@@ -275,8 +279,7 @@ async function getProductionStrategyPolicy(force = false) {
         domains:[domain]
       })
     }));
-  }));
-  const horizonReplays=horizonReplayGroups.flat();
+  });
 
   const perDomain: Record<string, any> = {};
   let totalSamples = 0;
@@ -2984,7 +2987,10 @@ async function runPaperEntryWorker() {
 
     const currentOpenPaperTrades = await getOpenPaperTrades(500).catch(() => []);
     let paperOpenExposureUsd=(currentOpenPaperTrades as any[]).reduce(
-      (sum,trade)=>sum+Math.max(0,Number(trade.stakeUsd || 0)),
+      (sum,trade)=>{
+        const parsed=Number(trade.stakeUsd ?? trade.stake_usd ?? 0);
+        return sum+(Number.isFinite(parsed) ? Math.max(0,parsed) : 0);
+      },
       0
     );
 
