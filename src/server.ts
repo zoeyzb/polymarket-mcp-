@@ -2913,7 +2913,15 @@ async function runBackgroundScan() {
       [...tokens],
       "multi_horizon_scanner",
       Math.max(180, BACKGROUND_SCAN_SECONDS * 3)
-    );
+    ).catch(error => {
+      console.error(JSON.stringify({
+        level:"warn",
+        message:"realtime_target_persistence_degraded",
+        error:errorMessage(error),
+        inMemoryTargets:tokens.size,
+        at:new Date().toISOString()
+      }));
+    });
 
     if (ROLE_STREAMS) {
       realtimeTracker.updateTokens([...tokens]);
