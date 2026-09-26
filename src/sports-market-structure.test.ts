@@ -96,6 +96,17 @@ describe("sports market structure", () => {
     expect(result?.line).toBe(6.5);
   });
 
+  it("classifies team-specific O/U shorthand as a team total", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "Iceland vs. Estonia: Estonia O/U 2.5",
+      sportsMarketType: "",
+      events: [{ title: "Iceland vs. Estonia", gameId: 12345 }]
+    }));
+    expect(result?.kind).toBe("team_total");
+    expect(result?.subject).toBe("Estonia");
+    expect(result?.line).toBe(2.5);
+  });
+
   it("classifies leading at halftime as a first-half moneyline", () => {
     const result = classifySportsMarketStructure(market({
       question: "Vitesse Arnhem leading at halftime?",
