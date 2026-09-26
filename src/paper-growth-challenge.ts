@@ -21,8 +21,18 @@ function growthScore(candidate:GrowthCandidate) {
   return sportsBonus+balanceScore+turnoverScore+liquidityScore;
 }
 
-export function chooseGrowthCandidate(candidates:GrowthCandidate[]):GrowthCandidate|null {
+export interface GrowthSelectionOptions {
+  excludedIds?: Set<string>;
+  excludedFamilies?: Set<string>;
+}
+
+export function chooseGrowthCandidate(
+  candidates:GrowthCandidate[],
+  options:GrowthSelectionOptions={}
+):GrowthCandidate|null {
   const eligible=candidates
+    .filter(candidate=>!options.excludedIds?.has(candidate.id))
+    .filter(candidate=>!options.excludedFamilies?.has(candidate.family))
     .filter(candidate=>
       Number.isFinite(candidate.entryPrice) &&
       candidate.entryPrice>=0.72 &&
