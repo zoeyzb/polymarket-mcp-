@@ -105,6 +105,7 @@ import { sizeBankrollTrade } from "./bankroll.js";
 import { computePaperPortfolioState } from "./paper-portfolio.js";
 import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
+import { buildResearchCandidateUniverse } from "./research-universe.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -3352,10 +3353,14 @@ async function runPaperEntryWorker() {
       }
       let researchOpenCount=researchOpen.length;
 
-      const researchCandidates=[...candidates]
+      const researchCandidates=buildResearchCandidateUniverse(latest)
         .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
         .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
         .sort((a,b)=>{
+          const ad=strategyDomainForMarket(a.primaryCategory,a.question,a.slug);
+          const bd=strategyDomainForMarket(b.primaryCategory,b.question,b.slug);
+          const sportsDelta=Number(bd==="sports")-Number(ad==="sports");
+          if (sportsDelta) return sportsDelta;
           const ap=Math.max(...(a.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
           const bp=Math.max(...(b.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
           return bp-ap || Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
@@ -3462,7 +3467,8 @@ async function runPaperEntryWorker() {
             bestAsk:entryPrice,
             liquidityUsd:candidate.liquidityUsd,
             volume24hUsd:candidate.volume24hUsd,
-            outcomeCount:candidate.outcomes.length
+            outcomeCount:candidate.outcomes.length,
+            researchUniverse:"urgent2h+developing6h+broader24h+structural_binary"
           }
         });
         if ((result as any)?.inserted) {
@@ -3490,6 +3496,9 @@ async function runPaperEntryWorker() {
           }
         ])),
         openTrades:researchOpenCount,
+        candidateUniverse:researchCandidates.length,
+        sportsCandidates:researchCandidates.filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)==="sports").length,
+        multiOutcomeCandidates:researchCandidates.filter(candidate=>candidate.outcomes.length>2).length,
         stakeUsd:RESEARCH_SHADOW_STAKE_USD,
         minPrice:RESEARCH_SHADOW_MIN_PRICE,
         maxPrice:RESEARCH_SHADOW_MAX_PRICE,
