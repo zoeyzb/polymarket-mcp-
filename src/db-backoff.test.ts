@@ -19,6 +19,16 @@ describe("db quota backoff",()=>{
     expect(b.status(t+1000).delayMs).toBe(2000);
   });
 
+  it("coalesces concurrent quota failures while the breaker is already open",()=>{
+    const b=createDbBackoff({baseMs:1000,maxMs:8000});
+    const first=b.noteFailure(new Error("quota exceeded"),1000);
+    const concurrent=b.noteFailure(new Error("quota exceeded"),1001);
+    expect(first.failures).toBe(1);
+    expect(concurrent.coalesced).toBe(true);
+    expect(concurrent.failures).toBe(1);
+    expect(b.status(1001).delayMs).toBe(1000);
+  });
+
   it("caps backoff",()=>{
     const b=createDbBackoff({baseMs:1000,maxMs:4000});
     let now=0;
