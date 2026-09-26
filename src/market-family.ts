@@ -53,11 +53,11 @@ export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
     if (kind==="score_band" || kind==="exact_score") return "sports_score_band";
     if (kind.startsWith("period_")) return "sports_period";
     if (outcomeCount > 2 && !kind) {
-      if (/\bexact score|correct score|score band|\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\b/i.test(question)) return "sports_score_band";
+      if (/\b(exact score|correct score|score band)\b/i.test(question) || (/\b(score|goals?|points?|runs?|rounds?|games?|sets?)\b/i.test(question) && /\b\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\b/i.test(question))) return "sports_score_band";
       return "multi_outcome";
     }
 
-    if (/\bspread\b|handicap|[+-]\d+(?:\.\d+)?\b/.test(question)) return "sports_spread";
+    if (/\bspread\b|\bhandicap\b/i.test(question) || /(?:^|\s)[+-]\d+(?:\.\d+)?(?=\s|$|[?)])/i.test(question)) return "sports_spread";
     if (/\bteam total\b/i.test(question)) return "sports_team_total";
     if (/\b(player prop|rebounds?|assists?|passing yards?|rushing yards?|receiving yards?|strikeouts?|home runs?|shots?|saves?|kills?|aces?)\b/i.test(question) && THRESHOLD_RE.test(question)) return "sports_player_prop";
     if (looksLikeHistoricalPlayerProp(question)) return "sports_player_prop";
