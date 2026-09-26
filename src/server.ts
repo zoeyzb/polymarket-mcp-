@@ -98,6 +98,8 @@ import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-obj
 import { renderDashboardHtml } from "./dashboard.js";
 import type { NormalizedBook, ScanCandidate } from "./types.js";
 import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
+import { routeCandidateToValidatedHorizon, STRATEGY_HORIZONS, type StrategyHorizon } from "./horizon-routing.js";
+import { sizeBankrollTrade } from "./bankroll.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -255,55 +257,82 @@ async function getProductionStrategyPolicy(force = false) {
     return policy;
   }
 
-  const replays = await Promise.all(domains.map(async domain => {
-    const replay = await runHistoricalReplay({
-      years:3,
-      horizon:"tMinus60m",
-      threshold:0.9,
-      bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
-      domains:[domain]
-    });
-    return [domain,replay] as const;
-  }));
+  const horizonReplays = await Promise.all(domains.flatMap(domain =>
+    STRATEGY_HORIZONS.map(async horizon => {
+      const replay = await runHistoricalReplay({
+        years:3,
+        horizon,
+        threshold:0.9,
+        bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+        domains:[domain]
+      });
+      return {domain,horizon,replay};
+    })
+  ));
 
   const perDomain: Record<string, any> = {};
   let totalSamples = 0;
 
-  for (const [domain,replay] of replays) {
-    totalSamples += Number(replay.sampleCount || 0);
-    const walk = replay.walkForward as any;
-    const calendarWalk = replay.calendarWalkForward as any;
-    const calibrated = replay.calibrated as any;
-    const enabled = calibrationComplete && calendarWalk?.deployable === true;
-    perDomain[domain] = {
-      enabled,
-      sampleCount:replay.sampleCount,
-      reason:!calibrationComplete
-        ? "causal_v2_rebuild_incomplete"
-        : calendarWalk?.reason || "calendar_walk_forward_unavailable",
-      calendarWalkForward:{
+  for (const domain of domains) {
+    const domainRows=horizonReplays.filter(row=>row.domain===domain);
+    const horizons:Record<string,any>={};
+    for (const row of domainRows) {
+      const replay=row.replay as any;
+      const walk = replay.walkForward as any;
+      const calendarWalk = replay.calendarWalkForward as any;
+      const calibrated = replay.calibrated as any;
+      const enabled = calibrationComplete && calendarWalk?.deployable === true;
+      horizons[row.horizon]={
+        enabled,
         deployable:enabled,
-        selectedPolicy:calendarWalk?.selectedPolicy ?? null,
-        foldSummary:calendarWalk?.foldSummary ?? null,
-        holdout:calendarWalk?.holdout ?? null,
-        holdoutDaily:calendarWalk?.holdoutDaily ?? null,
-        diagnostics:calendarWalk?.diagnostics ?? null,
-        requirements:calendarWalk?.requirements ?? null
+        sampleCount:replay.sampleCount,
+        reason:!calibrationComplete
+          ? "causal_v2_rebuild_incomplete"
+          : calendarWalk?.reason || "calendar_walk_forward_unavailable",
+        calendarWalkForward:{
+          deployable:enabled,
+          selectedPolicy:calendarWalk?.selectedPolicy ?? null,
+          foldSummary:calendarWalk?.foldSummary ?? null,
+          holdout:calendarWalk?.holdout ?? null,
+          holdoutDaily:calendarWalk?.holdoutDaily ?? null,
+          bankrollSimulation:calendarWalk?.bankrollSimulation ?? null,
+          dailyGrowthScore:calendarWalk?.dailyGrowthScore ?? null,
+          diagnostics:calendarWalk?.diagnostics ?? null,
+          requirements:calendarWalk?.requirements ?? null
+        },
+        sampleWalkForward:{
+          deployable:walk?.deployable === true,
+          selectedPolicy:walk?.selectedPolicy ?? null,
+          foldSummary:walk?.foldSummary ?? null,
+          holdout:walk?.holdout ?? null,
+          holdoutDaily:walk?.holdoutDaily ?? null,
+          requirements:walk?.requirements ?? null
+        },
+        calibratedResearch:{
+          deployable:calibrated?.deployable === true,
+          validation:calibrated?.validation ?? null,
+          holdout:calibrated?.holdout ?? null,
+          reason:calibrated?.reason ?? null
+        }
+      };
+    }
+    const compatibility=horizons.tMinus60m || null;
+    const enabledHorizons=STRATEGY_HORIZONS.filter(horizon=>horizons[horizon]?.enabled===true);
+    const sampleCount=Math.max(0,...domainRows.map(row=>Number((row.replay as any)?.sampleCount||0)));
+    totalSamples += sampleCount;
+    perDomain[domain] = {
+      enabled:enabledHorizons.length>0,
+      enabledHorizons,
+      sampleCount,
+      reason:enabledHorizons.length
+        ? "validated_horizon_available"
+        : compatibility?.reason || "no_validated_horizon",
+      horizons,
+      calendarWalkForward:compatibility?.calendarWalkForward || {
+        deployable:false,selectedPolicy:null,foldSummary:null,holdout:null,holdoutDaily:null,bankrollSimulation:null,dailyGrowthScore:null,diagnostics:null,requirements:null
       },
-      sampleWalkForward:{
-        deployable:walk?.deployable === true,
-        selectedPolicy:walk?.selectedPolicy ?? null,
-        foldSummary:walk?.foldSummary ?? null,
-        holdout:walk?.holdout ?? null,
-        holdoutDaily:walk?.holdoutDaily ?? null,
-        requirements:walk?.requirements ?? null
-      },
-      calibratedResearch:{
-        deployable:calibrated?.deployable === true,
-        validation:calibrated?.validation ?? null,
-        holdout:calibrated?.holdout ?? null,
-        reason:calibrated?.reason ?? null
-      }
+      sampleWalkForward:compatibility?.sampleWalkForward || null,
+      calibratedResearch:compatibility?.calibratedResearch || null
     };
   }
 
@@ -2517,6 +2546,11 @@ const PAPER_TRADE_MIN_HOLDOUT_ROI_PCT = Math.max(0, Number(process.env.PAPER_TRA
 const PAPER_TRADE_MIN_FOLD_ROI_PCT = Math.max(0, Number(process.env.PAPER_TRADE_MIN_FOLD_ROI_PCT || 0.25));
 const PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT = Math.max(0, Math.min(100, Number(process.env.PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT || 95)));
 const PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES = Math.max(1, Number(process.env.PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES || 25));
+const PAPER_TRADE_HORIZON_TOLERANCE_MINUTES = Math.max(1, Math.min(30, Number(process.env.PAPER_TRADE_HORIZON_TOLERANCE_MINUTES || 10)));
+const PAPER_DYNAMIC_SIZING_ENABLED = String(process.env.PAPER_DYNAMIC_SIZING_ENABLED || "false").toLowerCase() === "true";
+const PAPER_SIM_BANKROLL_USD = Math.max(25, Number(process.env.PAPER_SIM_BANKROLL_USD || 100));
+const PAPER_MAX_TRADE_FRACTION = Math.max(0.01, Math.min(0.5, Number(process.env.PAPER_MAX_TRADE_FRACTION || 0.25)));
+const PAPER_MAX_EXPOSURE_FRACTION = Math.max(PAPER_MAX_TRADE_FRACTION, Math.min(1, Number(process.env.PAPER_MAX_EXPOSURE_FRACTION || 0.5)));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -2905,15 +2939,26 @@ async function runPaperEntryWorker() {
     };
 
     for (const candidate of candidates) {
-      if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) { reject("outside_entry_window"); continue; }
       if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) { reject("invalid_market_shape"); continue; }
       const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
       if (domain === "political") { reject("political_disabled"); continue; }
 
       const domainPolicy=policy?.perDomain?.[domain];
       if (domainPolicy?.enabled !== true) { reject(`domain_disabled:${domain}`); continue; }
-
-      const productionPolicy=domainPolicy?.calendarWalkForward;
+      const route=routeCandidateToValidatedHorizon(
+        candidate.minutesRemaining,
+        Object.fromEntries(STRATEGY_HORIZONS.map(horizon=>[
+          horizon,
+          {
+            enabled:domainPolicy?.horizons?.[horizon]?.enabled === true,
+            deployable:domainPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
+          }
+        ])) as Partial<Record<StrategyHorizon,{enabled:boolean;deployable:boolean}>>,
+        PAPER_TRADE_HORIZON_TOLERANCE_MINUTES
+      );
+      if (!route) { reject("no_validated_horizon_in_tolerance"); continue; }
+      const horizonPolicy=domainPolicy?.horizons?.[route.horizon];
+      const productionPolicy=horizonPolicy?.calendarWalkForward;
       const selected=productionPolicy?.selectedPolicy;
       if (!selected || productionPolicy?.deployable !== true) { reject("production_policy_not_deployable"); continue; }
 
@@ -2949,13 +2994,10 @@ async function runPaperEntryWorker() {
           .sort((a,b)=>Number(b.budgetUsd)-Number(a.budgetUsd))[0];
       if (!execution || execution.avgFillPrice == null) { reject("insufficient_fill"); continue; }
 
-      const stake=Math.min(PAPER_TRADE_STAKE_USD,Number(execution.spendableUsd||execution.budgetUsd||0));
-      if (!(stake > 0)) { reject("zero_fillable_stake"); continue; }
-
       const chosenQuotedPrice=outcomeIndex===0 ? p0 : 1-p0;
       const liveCalibration=await getLiveChosenOutcomeCalibration({
         domain,
-        horizon:"tMinus60m",
+        horizon:route.horizon,
         outcomeIndex:outcomeIndex as 0|1,
         threshold,
         quotedPrice:chosenQuotedPrice,
@@ -2971,10 +3013,25 @@ async function runPaperEntryWorker() {
         minSamples:Number(selected.minBinSamples ?? 20)
       });
       if (!liveEvaluation.pass) { reject(`live_gate:${liveEvaluation.reason || "unknown"}`); continue; }
+
+      const fixedStake=Math.min(PAPER_TRADE_STAKE_USD,Number(execution.spendableUsd||execution.budgetUsd||0));
+      const sized=PAPER_DYNAMIC_SIZING_ENABLED
+        ? sizeBankrollTrade({
+            bankrollUsd:PAPER_SIM_BANKROLL_USD,
+            availableCashUsd:PAPER_SIM_BANKROLL_USD,
+            concurrentExposureUsd:0,
+            expectedEdgeBps:liveEvaluation.expectedEdgeBps,
+            expectedNetRoiPct:liveEvaluation.expectedNetRoiPct,
+            maxTradeFraction:PAPER_MAX_TRADE_FRACTION,
+            maxConcurrentExposureFraction:PAPER_MAX_EXPOSURE_FRACTION
+          }).stakeUsd
+        : fixedStake;
+      const stake=Math.min(sized,Number(execution.spendableUsd||execution.budgetUsd||0));
+      if (!(stake > 0)) { reject("zero_fillable_stake"); continue; }
       considered += 1;
 
       const result=await createPaperTrade({
-        strategyId:`calendar_walk_forward_${domain}_tMinus60m`,
+        strategyId:`calendar_walk_forward_${domain}_${route.horizon}`,
         calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
         conditionId:candidate.conditionId,
         marketId:candidate.id,
@@ -2999,6 +3056,8 @@ async function runPaperEntryWorker() {
           holdoutHitRatePct,
           holdoutTrades,
           productionDomainEnabled:true,
+          routedHorizon:route,
+          dynamicSizingEnabled:PAPER_DYNAMIC_SIZING_ENABLED,
           liveCalibration,
           liveEvaluation,
           calibration:policy?.calibration || null
@@ -3023,6 +3082,8 @@ async function runPaperEntryWorker() {
       considered,
       inserted,
       stakeUsd:PAPER_TRADE_STAKE_USD,
+      dynamicSizingEnabled:PAPER_DYNAMIC_SIZING_ENABLED,
+      horizonToleranceMinutes:PAPER_TRADE_HORIZON_TOLERANCE_MINUTES,
       totalCandidates:candidates.length,
       rejected,
       voidedInvalidOpenTrades:(voided as any)?.voided ?? 0,
