@@ -135,7 +135,8 @@ const ROLE_HISTORY = SERVICE_ROLE === "all" || SERVICE_ROLE === "history";
 const ROLE_MAINTENANCE = SERVICE_ROLE === "all" || SERVICE_ROLE === "maintenance";
 
 const DB_BACKOFF_SKIP_LOG_MS=Math.max(10_000,Number(process.env.DB_BACKOFF_SKIP_LOG_MS || 30_000));
-const DB_BACKOFF_LAST_SKIP_LOG=new Map<string,number>();
+let DB_BACKOFF_LAST_SKIP_LOG=0;
+const DB_BACKOFF_SKIPPED_WORKERS=new Set<string>();
 
 const DB_QUOTA_BACKOFF = createDbBackoff({
   baseMs:Math.max(5_000,Number(process.env.DB_QUOTA_BACKOFF_BASE_MS || 60_000)),
@@ -143,21 +144,25 @@ const DB_QUOTA_BACKOFF = createDbBackoff({
 });
 
 function dbQuotaSkip(worker:string){
-  if(DB_QUOTA_BACKOFF.shouldAttempt()) return false;
+  if(DB_QUOTA_BACKOFF.shouldAttempt()){
+    DB_BACKOFF_SKIPPED_WORKERS.clear();
+    return false;
+  }
   const now=Date.now();
-  const last=DB_BACKOFF_LAST_SKIP_LOG.get(worker) || 0;
-  if(now-last>=DB_BACKOFF_SKIP_LOG_MS){
-    DB_BACKOFF_LAST_SKIP_LOG.set(worker,now);
+  DB_BACKOFF_SKIPPED_WORKERS.add(worker);
+  if(now-DB_BACKOFF_LAST_SKIP_LOG>=DB_BACKOFF_SKIP_LOG_MS){
+    DB_BACKOFF_LAST_SKIP_LOG=now;
     const status=DB_QUOTA_BACKOFF.status(now);
     console.warn(JSON.stringify({
       level:"warn",
       message:"db_quota_backoff_skip",
-      worker,
+      workers:[...DB_BACKOFF_SKIPPED_WORKERS].sort(),
       remainingMs:status.remainingMs,
       retryAt:status.retryAt,
       failures:status.failures,
       at:new Date().toISOString()
     }));
+    DB_BACKOFF_SKIPPED_WORKERS.clear();
   }
   return true;
 }
@@ -165,6 +170,7 @@ function dbQuotaSkip(worker:string){
 function noteDbWorkerFailure(worker:string,error:unknown){
   const opened=DB_QUOTA_BACKOFF.noteFailure(error);
   if(opened.opened){
+    if((opened as any).coalesced) return true;
     console.warn(JSON.stringify({
       level:"warn",
       message:"db_quota_backoff_opened",
