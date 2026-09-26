@@ -158,15 +158,21 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,trades]=await Promise.all([
+    const [stats,researchStats,combinedStats,trades]=await Promise.all([
+      getPaperTradingStats("calendar_walk_forward_"),
+      getPaperTradingStats("research_shadow_"),
       getPaperTradingStats(),
       listPaperTrades(bounded)
     ]);
     const value={
       enabled:PAPER_TRADING_ENABLED,
+      researchShadowEnabled:RESEARCH_SHADOW_ENABLED,
       requireCausalV2Complete:PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE,
       stakeUsd:PAPER_TRADE_STAKE_USD,
+      researchStakeUsd:RESEARCH_SHADOW_STAKE_USD,
       stats,
+      researchStats,
+      combinedStats,
       trades
     };
     paperTradingApiCache={at:Date.now(),limit:bounded,value};
@@ -2716,6 +2722,13 @@ const PAPER_DYNAMIC_SIZING_ENABLED = String(process.env.PAPER_DYNAMIC_SIZING_ENA
 const PAPER_SIM_BANKROLL_USD = Math.max(25, Number(process.env.PAPER_SIM_BANKROLL_USD || 100));
 const PAPER_MAX_TRADE_FRACTION = Math.max(0.01, Math.min(0.5, Number(process.env.PAPER_MAX_TRADE_FRACTION || 0.25)));
 const PAPER_MAX_EXPOSURE_FRACTION = Math.max(PAPER_MAX_TRADE_FRACTION, Math.min(1, Number(process.env.PAPER_MAX_EXPOSURE_FRACTION || 0.5)));
+const RESEARCH_SHADOW_ENABLED = String(process.env.RESEARCH_SHADOW_ENABLED || "true").toLowerCase() !== "false";
+const RESEARCH_SHADOW_BANKROLL_USD = Math.max(25, Number(process.env.RESEARCH_SHADOW_BANKROLL_USD || 100));
+const RESEARCH_SHADOW_STAKE_USD = Math.max(1, Math.min(25, Number(process.env.RESEARCH_SHADOW_STAKE_USD || 5)));
+const RESEARCH_SHADOW_MIN_PRICE = Math.max(0.5, Math.min(0.99, Number(process.env.RESEARCH_SHADOW_MIN_PRICE || 0.9)));
+const RESEARCH_SHADOW_MAX_PRICE = Math.max(RESEARCH_SHADOW_MIN_PRICE, Math.min(0.999, Number(process.env.RESEARCH_SHADOW_MAX_PRICE || 0.985)));
+const RESEARCH_SHADOW_MIN_LIQUIDITY_USD = Math.max(0, Number(process.env.RESEARCH_SHADOW_MIN_LIQUIDITY_USD || 250));
+const RESEARCH_SHADOW_MAX_OPEN_TRADES = Math.max(1, Math.min(100, Number(process.env.RESEARCH_SHADOW_MAX_OPEN_TRADES || 20)));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -3074,6 +3087,8 @@ async function runPaperEntryWorker() {
     let voidedHorizonMismatches = 0;
     const openForDomainAudit = await getOpenPaperTrades(500).catch(() => []);
     for (const trade of openForDomainAudit as any[]) {
+      const strategyId=String(trade.strategyId || "");
+      if (!strategyId.startsWith("calendar_walk_forward_")) continue;
       const correctedDomain = strategyDomainForMarket("", String(trade.question || ""), String(trade.slug || ""));
       const storedDomain = String(trade.domain || "other");
       if (correctedDomain !== "other" && correctedDomain !== storedDomain) {
@@ -3091,11 +3106,6 @@ async function runPaperEntryWorker() {
         continue;
       }
 
-      const strategyId=String(trade.strategyId || "");
-      if (!strategyId.startsWith("calendar_walk_forward_")) {
-        await voidPaperTrade(trade.id, "legacy_nonproduction_shadow_policy").catch(() => null);
-        continue;
-      }
       const horizonMatch=strategyId.match(/_(tMinus(?:15|30|60|120)m)$/);
       const storedHorizon=horizonMatch?.[1] as StrategyHorizon | undefined;
       if (!storedHorizon || policy?.perDomain?.[effectiveDomain]?.horizons?.[storedHorizon]?.enabled !== true) {
@@ -3110,13 +3120,15 @@ async function runPaperEntryWorker() {
     }
 
     const currentOpenPaperTrades = await getOpenPaperTrades(500).catch(() => []);
-    let paperOpenExposureUsd=(currentOpenPaperTrades as any[]).reduce(
-      (sum,trade)=>{
-        const parsed=Number(trade.stakeUsd ?? trade.stake_usd ?? 0);
-        return sum+(Number.isFinite(parsed) ? Math.max(0,parsed) : 0);
-      },
-      0
-    );
+    let paperOpenExposureUsd=(currentOpenPaperTrades as any[])
+      .filter(trade=>String(trade.strategyId || "").startsWith("calendar_walk_forward_"))
+      .reduce(
+        (sum,trade)=>{
+          const parsed=Number(trade.stakeUsd ?? trade.stake_usd ?? 0);
+          return sum+(Number.isFinite(parsed) ? Math.max(0,parsed) : 0);
+        },
+        0
+      );
 
     const latest = await getLatestMultiHorizonSnapshot();
     if (!latest) return;
@@ -3270,6 +3282,146 @@ async function runPaperEntryWorker() {
         inserted += 1;
         if (PAPER_DYNAMIC_SIZING_ENABLED) paperOpenExposureUsd += stake;
       }
+    }
+
+    let researchInserted=0;
+    let researchConsidered=0;
+    const researchRejected:Record<string,number>={};
+    if (RESEARCH_SHADOW_ENABLED) {
+      const researchOpen=(currentOpenPaperTrades as any[])
+        .filter(trade=>String(trade.strategyId || "").startsWith("research_shadow_"));
+      const researchStats=await getPaperTradingStats("research_shadow_").catch(()=>null) as any;
+      let researchOpenExposureUsd=Math.max(0,Number(researchStats?.openExposureUsd || 0));
+      const realizedResearchPnlUsd=Number(researchStats?.netPnlUsd || 0);
+      let researchAvailableCashUsd=Math.max(
+        0,
+        RESEARCH_SHADOW_BANKROLL_USD + (Number.isFinite(realizedResearchPnlUsd) ? realizedResearchPnlUsd : 0) - researchOpenExposureUsd
+      );
+      let researchOpenCount=researchOpen.length;
+
+      const researchCandidates=[...candidates]
+        .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
+        .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
+        .sort((a,b)=>{
+          const ap=Math.max(...(a.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+          const bp=Math.max(...(b.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+          return bp-ap || Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
+        });
+
+      for (const candidate of researchCandidates) {
+        if (researchOpenCount >= RESEARCH_SHADOW_MAX_OPEN_TRADES) break;
+        if (researchAvailableCashUsd < 1) break;
+        if (Number(candidate.liquidityUsd || 0) < RESEARCH_SHADOW_MIN_LIQUIDITY_USD) {
+          researchRejected.low_liquidity=(researchRejected.low_liquidity||0)+1;
+          continue;
+        }
+
+        const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
+        const family=marketFamilyFromCandidate(candidate,domain);
+        const familyProductionEnabled=policy?.perDomain?.[domain]?.families?.[family]?.enabled===true;
+        if (familyProductionEnabled) {
+          researchRejected.production_family=(researchRejected.production_family||0)+1;
+          continue;
+        }
+
+        const prices=(candidate.displayedOutcomePrices || []).map(Number);
+        let outcomeIndex=-1;
+        let displayedPrice=-Infinity;
+        for (let index=0; index<prices.length; index++) {
+          const price=prices[index];
+          if (Number.isFinite(price) && price>displayedPrice) {
+            displayedPrice=price;
+            outcomeIndex=index;
+          }
+        }
+        if (
+          outcomeIndex<0 ||
+          displayedPrice<RESEARCH_SHADOW_MIN_PRICE ||
+          displayedPrice>RESEARCH_SHADOW_MAX_PRICE
+        ) {
+          researchRejected.price_band=(researchRejected.price_band||0)+1;
+          continue;
+        }
+
+        const tokenId=candidate.tokenIds[outcomeIndex];
+        const book=candidate.books?.find(book=>book.tokenId===tokenId) || candidate.books?.[outcomeIndex];
+        if (!book || !(Number(book.bestAsk)>0 && Number(book.bestAsk)<1)) {
+          researchRejected.missing_book=(researchRejected.missing_book||0)+1;
+          continue;
+        }
+        const entryPrice=Number(book.bestAsk);
+        if (entryPrice<RESEARCH_SHADOW_MIN_PRICE || entryPrice>RESEARCH_SHADOW_MAX_PRICE) {
+          researchRejected.ask_outside_band=(researchRejected.ask_outside_band||0)+1;
+          continue;
+        }
+
+        const stake=Math.min(
+          RESEARCH_SHADOW_STAKE_USD,
+          researchAvailableCashUsd,
+          RESEARCH_SHADOW_BANKROLL_USD*0.1
+        );
+        if (!(stake>0)) break;
+        researchConsidered += 1;
+
+        const result=await createPaperTrade({
+          strategyId:`research_shadow_${domain}_${family}`,
+          calibrationVersion:null,
+          conditionId:candidate.conditionId,
+          marketId:candidate.id,
+          slug:candidate.slug,
+          question:candidate.question,
+          domain,
+          outcome:candidate.outcomes[outcomeIndex],
+          tokenId,
+          entryAt:new Date().toISOString(),
+          expectedResolutionAt:candidate.endDate,
+          entryPrice,
+          stakeUsd:stake,
+          expectedEdgeBps:null,
+          expectedRoiPct:null,
+          feeRate:paperFeeRate(domain),
+          policySnapshot:{
+            lane:"research_shadow",
+            executable:false,
+            marketFamily:family,
+            reason:"family_not_production_validated",
+            minPrice:RESEARCH_SHADOW_MIN_PRICE,
+            maxPrice:RESEARCH_SHADOW_MAX_PRICE,
+            bankrollUsd:RESEARCH_SHADOW_BANKROLL_USD
+          },
+          marketSnapshot:{
+            minutesRemaining:candidate.minutesRemaining,
+            displayedOutcomePrices:candidate.displayedOutcomePrices,
+            chosenDisplayedPrice:displayedPrice,
+            bestAsk:entryPrice,
+            liquidityUsd:candidate.liquidityUsd,
+            volume24hUsd:candidate.volume24hUsd,
+            outcomeCount:candidate.outcomes.length
+          }
+        });
+        if ((result as any)?.inserted) {
+          researchInserted += 1;
+          researchOpenCount += 1;
+          researchOpenExposureUsd += stake;
+          researchAvailableCashUsd=Math.max(0,researchAvailableCashUsd-stake);
+        }
+      }
+
+      console.log(JSON.stringify({
+        level:"info",
+        message:"research_shadow_entries",
+        considered:researchConsidered,
+        inserted:researchInserted,
+        bankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+        availableCashUsd:Number(researchAvailableCashUsd.toFixed(2)),
+        openExposureUsd:Number(researchOpenExposureUsd.toFixed(2)),
+        openTrades:researchOpenCount,
+        stakeUsd:RESEARCH_SHADOW_STAKE_USD,
+        minPrice:RESEARCH_SHADOW_MIN_PRICE,
+        maxPrice:RESEARCH_SHADOW_MAX_PRICE,
+        rejected:researchRejected,
+        at:new Date().toISOString()
+      }));
     }
 
     console.log(JSON.stringify({
