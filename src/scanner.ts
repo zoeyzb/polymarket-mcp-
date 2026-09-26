@@ -1205,6 +1205,10 @@ export async function scanMultiHorizon(options?: {
   const negRiskMarkets: GammaMarket[] = [];
   const sourceMode = options?.sourceMode ?? "full";
   const nearTermMinutes = Math.max(60, Math.min(1440, Number(options?.nearTermMinutes ?? 1440)));
+  let remainingNearTermBookChecks =
+    sourceMode === "near_term"
+      ? Math.max(100, Math.min(5000, Number(process.env.NEAR_TERM_BOOK_CHECK_LIMIT || 1200)))
+      : Number.POSITIVE_INFINITY;
 
   async function* marketPages() {
     if (sourceMode === "near_term") {
@@ -1264,11 +1268,30 @@ export async function scanMultiHorizon(options?: {
       prelim.push({ market, candidate });
 
       if (
-        candidate.minutesRemaining <= 1440 ||
-        gammaSuggestsBookCheck(market)
+        sourceMode === "full" &&
+        (candidate.minutesRemaining <= 1440 || gammaSuggestsBookCheck(market))
       ) {
         bookMarkets.push(market);
       }
+    }
+
+    if (sourceMode === "near_term" && remainingNearTermBookChecks > 0) {
+      const prioritized = [...prelim].sort((a,b) => {
+        const aGamma = gammaSuggestsBookCheck(a.market) ? 1 : 0;
+        const bGamma = gammaSuggestsBookCheck(b.market) ? 1 : 0;
+        if (bGamma !== aGamma) return bGamma - aGamma;
+        const aUrgent = a.candidate.minutesRemaining <= 120 ? 2 : a.candidate.minutesRemaining <= 360 ? 1 : 0;
+        const bUrgent = b.candidate.minutesRemaining <= 120 ? 2 : b.candidate.minutesRemaining <= 360 ? 1 : 0;
+        if (bUrgent !== aUrgent) return bUrgent - aUrgent;
+        return b.candidate.rapidReviewScore - a.candidate.rapidReviewScore ||
+          b.candidate.liquidityUsd - a.candidate.liquidityUsd;
+      });
+      const perChunk = Math.max(25, Math.min(250, Number(process.env.NEAR_TERM_BOOK_CHECKS_PER_CHUNK || 100)));
+      const selected = prioritized
+        .slice(0, Math.min(perChunk, remainingNearTermBookChecks))
+        .map(item => item.market);
+      bookMarkets.push(...selected);
+      remainingNearTermBookChecks -= selected.length;
     }
 
     let booksByToken = new Map<string, NormalizedBook>();
@@ -1309,10 +1332,22 @@ export async function scanMultiHorizon(options?: {
 
   const within24h = retained.filter(candidate => candidate.minutesRemaining <= 1440);
   if (within24h.length) {
-    await enrichBehaviorSignals(within24h);
-    await enrichExternalEvidence(within24h);
-    await enrichHistoricalEvidence(within24h);
-    await enrichAdvancedIntelligence(within24h);
+    const deepLimit =
+      sourceMode === "near_term"
+        ? Math.max(100, Math.min(2000, Number(process.env.NEAR_TERM_DEEP_ENRICH_LIMIT || 750)))
+        : within24h.length;
+    const deepTargets = [...within24h]
+      .sort((a,b) =>
+        b.rapidReviewScore - a.rapidReviewScore ||
+        b.liquidityUsd - a.liquidityUsd ||
+        a.minutesRemaining - b.minutesRemaining
+      )
+      .slice(0, deepLimit);
+
+    await enrichBehaviorSignals(deepTargets);
+    await enrichExternalEvidence(deepTargets);
+    await enrichHistoricalEvidence(deepTargets);
+    await enrichAdvancedIntelligence(deepTargets);
   }
 
   const structuralBeyond24h = retained.filter(candidate =>
