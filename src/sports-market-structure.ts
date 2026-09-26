@@ -93,7 +93,7 @@ function detectSport(text: string) {
 
 function detectScope(text: string, rawType: string): SportsMarketScope {
   const haystack = `${text} ${rawType}`;
-  if (/\b(first|1st) half\b/i.test(haystack)) return "first_half";
+  if (/\b(first|1st) half\b|\bhalf[- ]?time\b/i.test(haystack)) return "first_half";
   if (/\b(second|2nd) half\b/i.test(haystack)) return "second_half";
   if (/\b(?:1st|2nd|3rd|4th|first|second|third|fourth) quarter\b|\bq[1-4]\b/i.test(haystack)) return "quarter";
   if (/\b(?:1st|2nd|3rd|first|second|third) period\b/i.test(haystack)) return "period";
@@ -134,6 +134,7 @@ function extractLine(market: GammaMarket, text: string): number | null {
 
   const patterns = [
     /\(([+-]?\d+(?:\.\d+)?)\)/,
+    /\b(?:o\/u|over\/under)\s*[: ]?\s*([+-]?\d+(?:\.\d+)?)/i,
     /\b(?:over|under|total|spread|line)\s*[: ]\s*([+-]?\d+(?:\.\d+)?)/i,
     /\b([+-]?\d+(?:\.\d+)?)\s*(?:points?|goals?|runs?|rebounds?|assists?|yards?|kills?)\b/i
   ];
@@ -220,6 +221,8 @@ export function classifySportsMarketStructure(
     rawType === "total"
   ) {
     kind = scope === "full_game" || scope === "match" ? "game_total" : "period_total";
+  } else if (/\b(?:leading|ahead) at half[- ]?time\b|\bhalf[- ]?time (?:leader|winner)\b/i.test(text)) {
+    kind = "period_moneyline";
   } else if (
     rawType === "moneyline" ||
     rawType === "money_line"
@@ -236,7 +239,7 @@ export function classifySportsMarketStructure(
   ) {
     kind = scope === "full_game" || scope === "match" ? "spread" : "period_spread";
   } else if (
-    /\bover\/under\b|\btotal (?:points|goals|runs|rounds|games|sets)\b|\bover \d|\bunder \d/i.test(text)
+    /\b(?:o\/u|over\/under)\b|\btotal (?:points|goals|runs|rounds|games|sets)\b|\bover \d|\bunder \d/i.test(text)
   ) {
     kind = scope === "full_game" || scope === "match" ? "game_total" : "period_total";
   } else if (
