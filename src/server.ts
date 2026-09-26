@@ -529,6 +529,7 @@ async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
         ? Number((totalMaxTestedFullFillUsd * (24 / laneWindowHours)).toFixed(2))
         : null
     },
+    structuralDiagnostics:latest.structuralUniverse?.diagnostics || null,
     capacityInterpretation:{
       type:"upper_bound_not_forecast",
       note:"Daily turnover upper bound scales the current window's tested full-fill capacity by 24/windowHours. It assumes replacement of observed markets and does not assume every market produces a valid strategy signal. Profit-target scenarios are withheld until the domain passes the production calendar gate."
@@ -2703,6 +2704,7 @@ async function runBackgroundScan() {
       structuralBinary: multi.structuralUniverse.binary.length,
       structuralEventBaskets: multi.structuralUniverse.eventBaskets.length,
       executableStructural: multi.structuralUniverse.executableCount,
+      structuralDiagnostics: multi.structuralUniverse.diagnostics || null,
       scanDurationMs: multi.scanDurationMs,
       at: new Date().toISOString()
     }));
@@ -2737,6 +2739,7 @@ async function runStructuralScan() {
       structuralBinary:structural.structuralUniverse.binary.length,
       structuralEventBaskets:structural.structuralUniverse.eventBaskets.length,
       executableStructural:structural.structuralUniverse.executableCount,
+      structuralDiagnostics:structural.structuralUniverse.diagnostics || null,
       scanDurationMs:structural.scanDurationMs,
       at:new Date().toISOString()
     }));
