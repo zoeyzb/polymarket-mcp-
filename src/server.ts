@@ -414,6 +414,68 @@ async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
   };
 }
 
+async function findSnapshotCandidateForTrade(input:{
+  conditionId?:string;
+  tokenId:string;
+  marketSlug?:string;
+}) {
+  const latest=await getLatestMultiHorizonSnapshot();
+  if(!latest) return null;
+  const pools:ScanCandidate[][]=[
+    latest.lanes?.urgent2h?.candidates || [],
+    latest.lanes?.developing6h?.candidates || [],
+    latest.lanes?.broader24h?.candidates || [],
+    latest.structuralUniverse?.binary || []
+  ];
+  const seen=new Set<string>();
+  for(const candidates of pools){
+    for(const candidate of candidates){
+      const key=candidate.conditionId || candidate.id || candidate.slug || candidate.question;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      if(
+        (input.conditionId && candidate.conditionId===input.conditionId) ||
+        (input.marketSlug && candidate.slug===input.marketSlug) ||
+        candidate.tokenIds.includes(input.tokenId)
+      ) return candidate;
+    }
+  }
+  return null;
+}
+
+async function validateTradeIntentPolicy(input:{
+  conditionId?:string;
+  tokenId:string;
+  marketSlug?:string;
+  strategyType:"directional"|"structural";
+}) {
+  const candidate=await findSnapshotCandidateForTrade(input);
+  if(!candidate) {
+    return {ok:false as const,reason:"market_not_in_fresh_scanner_snapshot"};
+  }
+  const domain=strategyDomainForCategory(candidate.primaryCategory);
+  if(domain==="political") {
+    return {ok:false as const,reason:"political_directional_execution_disabled",domain};
+  }
+
+  if(input.strategyType==="structural"){
+    const verified=candidate.opportunityClass==="executable_structural";
+    return verified
+      ? {ok:true as const,domain,candidate,policyType:"structural" as const}
+      : {ok:false as const,reason:"structural_edge_not_depth_verified",domain,candidate};
+  }
+
+  const policy=await getProductionStrategyPolicy(true) as any;
+  const domainPolicy=policy?.perDomain?.[domain];
+  if(policy?.calibration?.complete!==true) {
+    return {ok:false as const,reason:"causal_v2_rebuild_incomplete",domain,policy};
+  }
+  if(domainPolicy?.enabled!==true) {
+    return {ok:false as const,reason:domainPolicy?.reason || "directional_domain_gate_failed",domain,policy};
+  }
+  return {ok:true as const,domain,candidate,policyType:"directional" as const,policy};
+}
+
 async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
   const latest = await getLatestMultiHorizonSnapshot();
   if (!latest) return { generatedAt: null, lane, opportunities: [] };
@@ -1382,6 +1444,7 @@ export function createMcpServer() {
         marketSlug: z.string().optional(),
         question: z.string().optional(),
         outcome: z.string().optional(),
+        strategyType: z.enum(["directional","structural"]).default("directional"),
         side: z.enum(["BUY", "SELL"]),
         orderType: z.enum(["LIMIT", "MARKET"]),
         tif: z.string().optional(),
@@ -1393,6 +1456,22 @@ export function createMcpServer() {
       }
     },
     async input => {
+      const strategyGate=await validateTradeIntentPolicy({
+        conditionId:input.conditionId,
+        tokenId:input.tokenId,
+        marketSlug:input.marketSlug,
+        strategyType:input.strategyType
+      });
+      if(!strategyGate.ok){
+        return textResult({
+          ok:false,
+          reason:"production_strategy_gate_failed",
+          strategyGate,
+          submitted:false,
+          signingRequired:false
+        });
+      }
+
       const preview = await previewTrade(input);
       const criticalFailures = preview.checks.filter(
         check => check.severity === "critical" && !check.ok
@@ -1420,7 +1499,14 @@ export function createMcpServer() {
         size: input.size ?? null,
         amountUsdc: input.amountUsdc ?? null,
         maxSlippageBps: input.maxSlippageBps,
-        preview: preview as unknown as Record<string, unknown>,
+        preview: {
+          ...(preview as unknown as Record<string, unknown>),
+          strategyGate:{
+            strategyType:input.strategyType,
+            domain:strategyGate.domain,
+            policyType:strategyGate.policyType
+          }
+        },
         clientRequestId: input.clientRequestId ?? null
       });
 
