@@ -2,6 +2,8 @@ import { simulateBankroll } from "./bankroll.js";
 
 export interface HistoricalReplaySample {
   conditionId: string;
+  slug?: string | null;
+  question?: string;
   resolvedAt: string;
   domain: string;
   actualOutcome0: 0 | 1;
