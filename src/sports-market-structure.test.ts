@@ -87,6 +87,24 @@ describe("sports market structure", () => {
     expect(result?.line).toBe(47.5);
   });
 
+  it("classifies O/U shorthand as a game total", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "Granada CF vs. FC Andorra: O/U 6.5",
+      sportsMarketType: ""
+    }));
+    expect(result?.kind).toBe("game_total");
+    expect(result?.line).toBe(6.5);
+  });
+
+  it("classifies leading at halftime as a first-half moneyline", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "Vitesse Arnhem leading at halftime?",
+      sportsMarketType: ""
+    }));
+    expect(result?.kind).toBe("period_moneyline");
+    expect(result?.scope).toBe("first_half");
+  });
+
   it("classifies score bands like 4-7", () => {
     const result = classifySportsMarketStructure(market({
       question: "Total goals 4-7"
