@@ -1643,11 +1643,13 @@ export async function getHistoricalReplaySamples(options?: {
   years?: number;
   domains?: string[];
   limit?: number;
+  calibrationVersion?: string;
 }) {
   if (!pool) return [];
   const years = Math.max(0.25, Math.min(10, Number(options?.years ?? 3)));
   const limit = Math.max(1, Math.min(100000, Number(options?.limit ?? 50000)));
   const domains = (options?.domains || []).filter(Boolean);
+  const calibrationVersion = String(options?.calibrationVersion || "").trim();
 
   const { rows } = await pool.query(
     `select
@@ -1659,9 +1661,10 @@ export async function getHistoricalReplaySamples(options?: {
      from polymarket_brain.historical_calibration
      where resolved_at >= now() - ($1 || ' years')::interval
        and ($2::text[] = '{}'::text[] or domain = any($2::text[]))
+       and ($4 = '' or source_payload->>'calibrationVersion' = $4)
      order by resolved_at asc
      limit $3`,
-    [years, domains, limit]
+    [years, domains, limit, calibrationVersion]
   );
 
   return rows.map(row => ({
