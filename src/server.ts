@@ -3564,6 +3564,10 @@ async function runEphemeralResearchPaperWorker() {
 
   if(SPORTS_OBSERVATION_ENABLED){
     const observationStats=getEphemeralPaperStats("observation_sports_") as any;
+    const observationSeenKeys=new Set(
+      (listEphemeralPaperTrades(5000,"observation_sports_") as any[])
+        .map(trade=>`${trade.conditionId}:${trade.tokenId}`)
+    );
     const remaining=Math.max(0,SPORTS_OBSERVATION_MAX_OPEN-Number(observationStats.openTrades||0));
     const selections=remaining>0
       ? selectObservationCandidates(researchCandidates,{
@@ -3571,7 +3575,8 @@ async function runEphemeralResearchPaperWorker() {
           perFamilyLimit:SPORTS_OBSERVATION_PER_FAMILY,
           minLiquidityUsd:RESEARCH_SHADOW_MIN_LIQUIDITY_USD,
           minPrice:RESEARCH_SHADOW_MIN_PRICE,
-          maxPrice:0.99
+          maxPrice:0.99,
+          excludedKeys:observationSeenKeys
         })
       : [];
     let observationInserted=0;
