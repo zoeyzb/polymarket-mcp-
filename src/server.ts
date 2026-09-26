@@ -61,6 +61,7 @@ import {
   listPaperTrades,
   createPaperTrade,
   settlePaperTrade,
+  voidInvalidOpenPaperTrades,
   listTradeIntents,
   createTradeIntent,
   createTradingControlRequest,
@@ -2493,6 +2494,10 @@ const PAPER_TRADING_SECONDS = Math.max(60, Number(process.env.PAPER_TRADING_SECO
 const PAPER_TRADE_STAKE_USD = Math.max(1, Math.min(100, Number(process.env.PAPER_TRADE_STAKE_USD || 25)));
 const PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE =
   String(process.env.PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE || "true").toLowerCase() !== "false";
+const PAPER_TRADE_MIN_HOLDOUT_ROI_PCT = Math.max(0, Number(process.env.PAPER_TRADE_MIN_HOLDOUT_ROI_PCT || 0.25));
+const PAPER_TRADE_MIN_FOLD_ROI_PCT = Math.max(0, Number(process.env.PAPER_TRADE_MIN_FOLD_ROI_PCT || 0.25));
+const PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT = Math.max(0, Math.min(100, Number(process.env.PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT || 95)));
+const PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES = Math.max(1, Number(process.env.PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES || 25));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -2840,6 +2845,8 @@ async function runPaperEntryWorker() {
       return;
     }
 
+    const voided = await voidInvalidOpenPaperTrades(PAPER_TRADE_MIN_HOLDOUT_ROI_PCT).catch(() => null);
+
     const latest = await getLatestMultiHorizonSnapshot();
     if (!latest) return;
     const candidates:ScanCandidate[] = latest.lanes?.urgent2h?.candidates || [];
@@ -2855,6 +2862,18 @@ async function runPaperEntryWorker() {
       const researchPolicy=policy?.perDomain?.[domain]?.sampleWalkForward;
       const selected=researchPolicy?.selectedPolicy;
       if (!selected) continue;
+
+      const holdoutRoiPct=Number(researchPolicy?.holdout?.roiPct ?? -Infinity);
+      const holdoutHitRatePct=Number(researchPolicy?.holdout?.hitRatePct ?? 0);
+      const holdoutTrades=Number(researchPolicy?.holdout?.trades ?? 0);
+      const minFoldRoiPct=Number(researchPolicy?.foldSummary?.minRoiPct ?? -Infinity);
+      const positiveResearchGate =
+        holdoutRoiPct >= PAPER_TRADE_MIN_HOLDOUT_ROI_PCT &&
+        minFoldRoiPct >= PAPER_TRADE_MIN_FOLD_ROI_PCT &&
+        holdoutHitRatePct >= PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT &&
+        holdoutTrades >= PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES;
+      if (!positiveResearchGate) continue;
+
       const threshold=Number(selected.threshold);
       if (!(threshold >= 0.5 && threshold < 1)) continue;
 
@@ -2895,11 +2914,16 @@ async function runPaperEntryWorker() {
         entryPrice:Number(execution.avgFillPrice),
         stakeUsd:stake,
         expectedEdgeBps:Number(selected.minEdgeBps ?? 0),
-        expectedRoiPct:Number(researchPolicy?.holdout?.roiPct ?? 0),
+        expectedRoiPct:holdoutRoiPct,
         feeRate:paperFeeRate(domain),
         policySnapshot:{
           selectedPolicy:selected,
           researchDeployable:researchPolicy?.deployable === true,
+          shadowPositiveRoiGate:true,
+          minFoldRoiPct,
+          holdoutRoiPct,
+          holdoutHitRatePct,
+          holdoutTrades,
           productionDomainEnabled:policy?.perDomain?.[domain]?.enabled === true,
           calibration:policy?.calibration || null
         },
@@ -2922,6 +2946,13 @@ async function runPaperEntryWorker() {
       considered,
       inserted,
       stakeUsd:PAPER_TRADE_STAKE_USD,
+      voidedInvalidOpenTrades:(voided as any)?.voided ?? 0,
+      positiveRoiGate:{
+        minHoldoutRoiPct:PAPER_TRADE_MIN_HOLDOUT_ROI_PCT,
+        minFoldRoiPct:PAPER_TRADE_MIN_FOLD_ROI_PCT,
+        minHoldoutHitRatePct:PAPER_TRADE_MIN_HOLDOUT_HIT_RATE_PCT,
+        minResearchHoldoutTrades:PAPER_TRADE_MIN_RESEARCH_HOLDOUT_TRADES
+      },
       at:new Date().toISOString()
     }));
   } catch(error) {

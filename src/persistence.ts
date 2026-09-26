@@ -2609,6 +2609,28 @@ export async function createPaperTrade(input: {
   return { configured:true,inserted:rows.length > 0,id:rows[0]?.id ?? null };
 }
 
+export async function voidInvalidOpenPaperTrades(minExpectedRoiPct = 0.25) {
+  if (!pool) return { configured:false, reason:"not_configured", voided:0 };
+  await ensurePaperTradingSchema();
+  const threshold = Math.max(0, Number(minExpectedRoiPct || 0));
+  const result = await pool.query(
+    `update polymarket_brain.paper_trades
+       set status='VOID',
+           updated_at=now(),
+           policy_snapshot =
+             coalesce(policy_snapshot,'{}'::jsonb) ||
+             jsonb_build_object(
+               'voidedReason','paper_positive_roi_gate',
+               'voidedAt',now(),
+               'minExpectedRoiPct',$1
+             )
+       where status='OPEN'
+         and coalesce(expected_roi_pct, -999999) < $1`,
+    [threshold]
+  );
+  return { configured:true, voided:result.rowCount ?? 0, minExpectedRoiPct:threshold };
+}
+
 export async function getOpenPaperTrades(limit = 500) {
   if (!pool) return [];
   await ensurePaperTradingSchema();
@@ -2689,7 +2711,8 @@ export async function getPaperTradingStats() {
   await ensurePaperTradingSchema();
   const {rows}=await pool.query(`
     select
-      count(*)::int as "trades",
+      count(*) filter (where status <> 'VOID')::int as "trades",
+      count(*) filter (where status='VOID')::int as "voidedTrades",
       count(*) filter (where status='OPEN')::int as "openTrades",
       count(*) filter (where status='WIN')::int as wins,
       count(*) filter (where status='LOSS')::int as losses,
