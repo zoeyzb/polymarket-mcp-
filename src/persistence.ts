@@ -2703,16 +2703,59 @@ export async function getPaperTradingStats() {
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.paper_trades
   `);
+  const daily = await pool.query(`
+    with daily as (
+      select
+        date_trunc('day', entry_at) as day,
+        count(*)::int as trades,
+        sum(stake_usd)::float8 as turnover_usd,
+        coalesce(sum(net_pnl_usd),0)::float8 as net_pnl_usd
+      from polymarket_brain.paper_trades
+      where status in ('WIN','LOSS')
+      group by 1
+    )
+    select
+      count(*)::int as "activeDays",
+      count(*) filter (where net_pnl_usd > 0)::int as "profitableDays",
+      count(*) filter (where net_pnl_usd < 0)::int as "losingDays",
+      avg(turnover_usd)::float8 as "avgFilledTurnoverUsdPerActiveDay",
+      max(turnover_usd)::float8 as "maxFilledTurnoverUsdPerDay",
+      avg(net_pnl_usd)::float8 as "avgNetPnlUsdPerActiveDay",
+      min(net_pnl_usd)::float8 as "worstDayNetPnlUsd",
+      max(net_pnl_usd)::float8 as "bestDayNetPnlUsd"
+    from daily
+  `);
+
   const row=rows[0]||{};
+  const dailyRow=daily.rows[0]||{};
   const resolved=Number(row.wins||0)+Number(row.losses||0);
   const resolvedStake=Number(row.resolvedStakeUsd||0);
   const net=Number(row.netPnlUsd||0);
+  const activeDays=Number(dailyRow.activeDays||0);
   return {
     configured:true,
     ...row,
     resolvedTrades:resolved,
     winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
-    aggregateRoiPct:resolvedStake>0 ? Number(((net/resolvedStake)*100).toFixed(3)) : null
+    aggregateRoiPct:resolvedStake>0 ? Number(((net/resolvedStake)*100).toFixed(3)) : null,
+    liveDailyCapacity:{
+      activeDays,
+      profitableDays:Number(dailyRow.profitableDays||0),
+      losingDays:Number(dailyRow.losingDays||0),
+      profitableDayPct:activeDays
+        ? Number(((Number(dailyRow.profitableDays||0)/activeDays)*100).toFixed(3))
+        : null,
+      avgFilledTurnoverUsdPerActiveDay:
+        dailyRow.avgFilledTurnoverUsdPerActiveDay == null ? null : Number(dailyRow.avgFilledTurnoverUsdPerActiveDay),
+      maxFilledTurnoverUsdPerDay:
+        dailyRow.maxFilledTurnoverUsdPerDay == null ? null : Number(dailyRow.maxFilledTurnoverUsdPerDay),
+      avgNetPnlUsdPerActiveDay:
+        dailyRow.avgNetPnlUsdPerActiveDay == null ? null : Number(dailyRow.avgNetPnlUsdPerActiveDay),
+      worstDayNetPnlUsd:
+        dailyRow.worstDayNetPnlUsd == null ? null : Number(dailyRow.worstDayNetPnlUsd),
+      bestDayNetPnlUsd:
+        dailyRow.bestDayNetPnlUsd == null ? null : Number(dailyRow.bestDayNetPnlUsd)
+    }
   };
 }
 

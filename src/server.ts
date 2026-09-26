@@ -384,15 +384,65 @@ async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
 
   const totalMaxTestedFullFillUsd = markets.reduce((sum,row)=>sum+Number(row.maxTestedFullFillUsd||0),0);
   const totalTop5AskDepthUsd = markets.reduce((sum,row)=>sum+Number(row.top5AskDepthUsd||0),0);
-  const byDomain:Record<string,{markets:number;maxTestedFullFillUsd:number;top5AskDepthUsd:number}> = {};
+  const laneWindowHours =
+    lane === "urgent_2h" ? 2 :
+    lane === "developing_6h" ? 6 :
+    lane === "broader_24h" ? 24 :
+    null;
+
+  const byDomainBase:Record<string,{markets:number;maxTestedFullFillUsd:number;top5AskDepthUsd:number}> = {};
   for(const row of markets){
     const domain = strategyDomainForCategory(row.category);
-    const item = byDomain[domain] || {markets:0,maxTestedFullFillUsd:0,top5AskDepthUsd:0};
+    const item = byDomainBase[domain] || {markets:0,maxTestedFullFillUsd:0,top5AskDepthUsd:0};
     item.markets += 1;
     item.maxTestedFullFillUsd += Number(row.maxTestedFullFillUsd||0);
     item.top5AskDepthUsd += Number(row.top5AskDepthUsd||0);
-    byDomain[domain]=item;
+    byDomainBase[domain]=item;
   }
+
+  const targetProfits = [100,500,1000];
+  const byDomain = Object.fromEntries(
+    Object.entries(byDomainBase).map(([domain,item]) => {
+      const stationaryDailyTurnoverUpperBoundUsd = laneWindowHours
+        ? Number((item.maxTestedFullFillUsd * (24 / laneWindowHours)).toFixed(2))
+        : null;
+      const domainPolicy = policy?.perDomain?.[domain];
+      const productionEnabled = domain !== "political" && domainPolicy?.enabled === true;
+      const validatedRoiPct = productionEnabled
+        ? Number(domainPolicy?.calendarWalkForward?.holdout?.roiPct || 0)
+        : null;
+      const targetPnlScenarios = Object.fromEntries(targetProfits.map(targetUsd => {
+        if (!productionEnabled || !(validatedRoiPct && validatedRoiPct > 0)) {
+          return [`target${targetUsd}`,{
+            targetNetPnlUsd:targetUsd,
+            available:false,
+            reason:productionEnabled
+              ? "validated_positive_roi_unavailable"
+              : "production_directional_gate_blocked"
+          }];
+        }
+        const requiredTurnoverUsd = targetUsd / (validatedRoiPct / 100);
+        return [`target${targetUsd}`,{
+          targetNetPnlUsd:targetUsd,
+          available:true,
+          validatedRoiPct,
+          requiredTurnoverUsd:Number(requiredTurnoverUsd.toFixed(2)),
+          stationaryCapacityUpperBoundUsd:stationaryDailyTurnoverUpperBoundUsd,
+          upperBoundCoversRequiredTurnover:
+            stationaryDailyTurnoverUpperBoundUsd !== null &&
+            stationaryDailyTurnoverUpperBoundUsd >= requiredTurnoverUsd
+        }];
+      }));
+
+      return [domain,{
+        ...item,
+        stationaryDailyTurnoverUpperBoundUsd,
+        productionEnabled,
+        validatedRoiPct,
+        targetPnlScenarios
+      }];
+    })
+  );
 
   return {
     generatedAt:latest.generatedAt,
@@ -407,7 +457,15 @@ async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
     totals:{
       markets:markets.length,
       totalMaxTestedFullFillUsd:Number(totalMaxTestedFullFillUsd.toFixed(2)),
-      totalTop5AskDepthUsd:Number(totalTop5AskDepthUsd.toFixed(2))
+      totalTop5AskDepthUsd:Number(totalTop5AskDepthUsd.toFixed(2)),
+      laneWindowHours,
+      stationaryDailyTurnoverUpperBoundUsd:laneWindowHours
+        ? Number((totalMaxTestedFullFillUsd * (24 / laneWindowHours)).toFixed(2))
+        : null
+    },
+    capacityInterpretation:{
+      type:"upper_bound_not_forecast",
+      note:"Daily turnover upper bound scales the current window's tested full-fill capacity by 24/windowHours. It assumes replacement of observed markets and does not assume every market produces a valid strategy signal. Profit-target scenarios are withheld until the domain passes the production calendar gate."
     },
     byDomain,
     markets
