@@ -171,8 +171,18 @@ async function getPaperTradingApiSnapshot(limit:number) {
       getPaperTradingConfidenceStats("research_shadow_"),
       listPaperTrades(bounded)
     ]);
-    const researchPortfolio=computePaperPortfolioState({
-      startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+    const researchPortfolios=Object.fromEntries(
+      ["ultra_high","high","exploratory"].map(band=>{
+        const row=(researchConfidenceStats as any[]).find(item=>String(item.confidenceBand)===band) || {};
+        return [band,computePaperPortfolioState({
+          startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+          realizedNetPnlUsd:Number(row.netPnlUsd || 0),
+          openExposureUsd:Number(row.openExposureUsd || 0)
+        })];
+      })
+    );
+    const researchPortfolioCombined=computePaperPortfolioState({
+      startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD*3,
       realizedNetPnlUsd:Number((researchStats as any)?.netPnlUsd || 0),
       openExposureUsd:Number((researchStats as any)?.openExposureUsd || 0)
     });
@@ -188,7 +198,8 @@ async function getPaperTradingApiSnapshot(limit:number) {
       productionFamilyStats,
       researchFamilyStats,
       researchConfidenceStats,
-      researchPortfolio,
+      researchPortfolios,
+      researchPortfolioCombined,
       trades
     };
     paperTradingApiCache={at:Date.now(),limit:bounded,value};
@@ -469,9 +480,12 @@ async function computeProductionStrategyPolicy(force = false) {
       };
     }
 
+    const enabledFamilyHorizonUnion=STRATEGY_HORIZONS.filter(horizon=>
+      Object.values(families).some((family:any)=>family?.horizons?.[horizon]?.enabled===true)
+    );
     perDomain[domain] = {
       enabled:Object.values(families).some((family:any)=>family?.enabled===true),
-      enabledHorizons,
+      enabledHorizons:enabledFamilyHorizonUnion,
       enabledFamilies:Object.entries(families).filter(([,family]:any)=>family?.enabled===true).map(([family])=>family),
       sampleCount,
       minFamilySamples,
