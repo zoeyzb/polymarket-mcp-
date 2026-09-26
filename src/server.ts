@@ -62,6 +62,7 @@ import {
   createPaperTrade,
   settlePaperTrade,
   voidInvalidOpenPaperTrades,
+  voidPaperTrade,
   listTradeIntents,
   createTradeIntent,
   createTradingControlRequest,
@@ -145,12 +146,27 @@ function normalizeOpportunityLane(value: string | null): OpportunityLane {
 let strategyPolicyCache: { at:number; value:any } | null = null;
 const STRATEGY_POLICY_CACHE_MS = Math.max(30_000, Number(process.env.STRATEGY_POLICY_CACHE_MS || 300_000));
 
-function strategyDomainForCategory(category: string) {
+function strategyDomainForMarket(category: string | null | undefined, question: string | null | undefined = "", slug: string | null | undefined = "") {
   const value = String(category || "other").toLowerCase();
+  const text = [question, slug].filter(Boolean).join(" ").toLowerCase();
+
   if (["politics","elections"].includes(value)) return "political";
-  if (["sports","nba","basketball","soccer","games_esports"].includes(value)) return "sports";
-  if (value === "crypto") return "crypto";
-  if (value === "weather") return "weather";
+
+  if (
+    ["sports","nba","basketball","soccer","games_esports"].includes(value) ||
+    /\b(nfl|nba|mlb|nhl|wnba|ncaa|soccer|football|baseball|basketball|hockey|tennis|ufc|mma|counter[- ]?strike|cs2|valorant|league of legends|dota|cricket|rugby|golf|esports)\b/i.test(text)
+  ) return "sports";
+
+  if (
+    value === "crypto" ||
+    /\b(bitcoin|btc|ethereum|ether|eth|solana|\bsol\b|xrp|ripple|dogecoin|doge|bnb|hyperliquid|hype|crypto|cryptocurrency)\b/i.test(text)
+  ) return "crypto";
+
+  if (
+    value === "weather" ||
+    /\b(weather|temperature|degrees?|rainfall|precipitation|snowfall|snow|hurricane|tropical storm|wind speed|heat index|coldest|hottest)\b/i.test(text)
+  ) return "weather";
+
   return "other";
 }
 
@@ -410,7 +426,7 @@ async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
 
   const byDomainBase:Record<string,{markets:number;maxTestedFullFillUsd:number;top5AskDepthUsd:number}> = {};
   for(const row of markets){
-    const domain = strategyDomainForCategory(row.category);
+    const domain = strategyDomainForMarket(row.category,row.question,row.slug);
     const item = byDomainBase[domain] || {markets:0,maxTestedFullFillUsd:0,top5AskDepthUsd:0};
     item.markets += 1;
     item.maxTestedFullFillUsd += Number(row.maxTestedFullFillUsd||0);
@@ -529,7 +545,7 @@ async function validateTradeIntentPolicy(input:{
   if(!candidate) {
     return {ok:false as const,reason:"market_not_in_fresh_scanner_snapshot"};
   }
-  const domain=strategyDomainForCategory(candidate.primaryCategory);
+  const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
   if(domain==="political") {
     return {ok:false as const,reason:"political_directional_execution_disabled",domain};
   }
@@ -584,7 +600,7 @@ async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
       .slice(0, Math.max(1, Math.min(500, limit)))
       .map(candidate => buildUnifiedOpportunity(candidate, lane, latest.generatedAt))
       .map(opportunity => {
-        const domain = strategyDomainForCategory(opportunity.market.category);
+        const domain = strategyDomainForMarket(opportunity.market.category,opportunity.market.question,opportunity.market.slug);
         const enabled = domain !== "political" && policy?.perDomain?.[domain]?.enabled === true;
         return {
           ...opportunity,
@@ -2846,6 +2862,19 @@ async function runPaperEntryWorker() {
     }
 
     const voided = await voidInvalidOpenPaperTrades(PAPER_TRADE_MIN_HOLDOUT_ROI_PCT).catch(() => null);
+    let voidedDomainMismatches = 0;
+    const openForDomainAudit = await getOpenPaperTrades(500).catch(() => []);
+    for (const trade of openForDomainAudit as any[]) {
+      const correctedDomain = strategyDomainForMarket("", String(trade.question || ""), String(trade.slug || ""));
+      const storedDomain = String(trade.domain || "other");
+      if (correctedDomain !== "other" && correctedDomain !== storedDomain) {
+        const result = await voidPaperTrade(
+          trade.id,
+          `domain_routing_mismatch:${storedDomain}->${correctedDomain}`
+        ).catch(() => null);
+        if ((result as any)?.updated) voidedDomainMismatches += 1;
+      }
+    }
 
     const latest = await getLatestMultiHorizonSnapshot();
     if (!latest) return;
@@ -2856,7 +2885,7 @@ async function runPaperEntryWorker() {
     for (const candidate of candidates) {
       if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) continue;
       if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) continue;
-      const domain=strategyDomainForCategory(candidate.primaryCategory);
+      const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
       if (domain === "political") continue;
 
       const researchPolicy=policy?.perDomain?.[domain]?.sampleWalkForward;
@@ -2947,6 +2976,7 @@ async function runPaperEntryWorker() {
       inserted,
       stakeUsd:PAPER_TRADE_STAKE_USD,
       voidedInvalidOpenTrades:(voided as any)?.voided ?? 0,
+      voidedDomainMismatches,
       positiveRoiGate:{
         minHoldoutRoiPct:PAPER_TRADE_MIN_HOLDOUT_ROI_PCT,
         minFoldRoiPct:PAPER_TRADE_MIN_FOLD_ROI_PCT,

@@ -2631,6 +2631,25 @@ export async function voidInvalidOpenPaperTrades(minExpectedRoiPct = 0.25) {
   return { configured:true, voided:result.rowCount ?? 0, minExpectedRoiPct:threshold };
 }
 
+export async function voidPaperTrade(id: string | number, reason: string) {
+  if (!pool) return { configured:false, reason:"not_configured", updated:false };
+  await ensurePaperTradingSchema();
+  const result = await pool.query(
+    `update polymarket_brain.paper_trades
+       set status='VOID',
+           updated_at=now(),
+           policy_snapshot =
+             coalesce(policy_snapshot,'{}'::jsonb) ||
+             jsonb_build_object(
+               'voidedReason',$2,
+               'voidedAt',now()
+             )
+       where id=$1 and status='OPEN'`,
+    [id, String(reason || "paper_trade_voided").slice(0,200)]
+  );
+  return { configured:true, updated:(result.rowCount ?? 0) > 0 };
+}
+
 export async function getOpenPaperTrades(limit = 500) {
   if (!pool) return [];
   await ensurePaperTradingSchema();
