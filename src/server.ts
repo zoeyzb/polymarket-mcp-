@@ -3400,7 +3400,8 @@ async function runEphemeralResearchPaperWorker() {
       decision:growthDecision,
       portfolioBefore:portfolio,
       daily:getEphemeralDailyStats("growth_100_"),
-      candidateCount:growthChoices.length,\n      excludedOpenFamilies:[...growthOpenFamilies],
+      candidateCount:growthChoices.length,
+      excludedOpenFamilies:[...growthOpenFamilies],
       dailyTargets:{
         target500Usd:{requiredReturnPct:400},
         target1000Usd:{requiredReturnPct:900},
