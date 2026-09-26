@@ -164,10 +164,19 @@ async function getProductionStrategyPolicy(force = false) {
     Math.min(100, Number(process.env.CAUSAL_V2_MIN_USABLE_COVERAGE_PCT || 80))
   );
   const usableCoveragePct = Number(calibrationSummary?.causalV2UsableCoveragePct || 0);
+  const maxPendingTail = Math.max(
+    0,
+    Math.min(100, Number(process.env.CAUSAL_V2_MAX_PENDING_TAIL || 10))
+  );
+  const completionCoveragePct = Math.max(
+    minUsableCoveragePct,
+    Math.min(100, Number(process.env.CAUSAL_V2_COMPLETION_COVERAGE_PCT || 99.9))
+  );
+  const remainingCausalRows = Number(calibrationSummary?.causalV2Remaining || 0);
   const calibrationComplete =
     Number(calibrationSummary?.sampleCount || 0) > 0 &&
-    Number(calibrationSummary?.causalV2Remaining || 0) === 0 &&
-    usableCoveragePct >= minUsableCoveragePct;
+    remainingCausalRows <= maxPendingTail &&
+    usableCoveragePct >= completionCoveragePct;
 
   const domains = ["sports","crypto","weather","other"] as const;
 
@@ -200,6 +209,10 @@ async function getProductionStrategyPolicy(force = false) {
         excludedRows:Number(calibrationSummary?.causalV2Excluded || 0),
         usableCoveragePct,
         minUsableCoveragePct,
+        completionCoveragePct,
+        maxPendingTail,
+        pendingTailRows:remainingCausalRows,
+        boundedTailAccepted:false,
         rebuildProgressPct:Number(calibrationSummary?.causalRebuildProgressPct || 0)
       },
       structuralStrategiesEnabled:true,
@@ -288,6 +301,10 @@ async function getProductionStrategyPolicy(force = false) {
       excludedRows:Number(calibrationSummary?.causalV2Excluded || 0),
       usableCoveragePct,
       minUsableCoveragePct,
+      completionCoveragePct,
+      maxPendingTail,
+      pendingTailRows:remainingCausalRows,
+      boundedTailAccepted:remainingCausalRows > 0,
       rebuildProgressPct:Number(calibrationSummary?.causalRebuildProgressPct || 0)
     },
     structuralStrategiesEnabled:true,
@@ -2181,19 +2198,31 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     );
     const remaining = Number((summary as any)?.causalV2Remaining || 0);
     const usableCoveragePct = Number((summary as any)?.causalV2UsableCoveragePct || 0);
+    const maxPendingTail = Math.max(
+      0,
+      Math.min(100, Number(process.env.CAUSAL_V2_MAX_PENDING_TAIL || 10))
+    );
+    const completionCoveragePct = Math.max(
+      minUsableCoveragePct,
+      Math.min(100, Number(process.env.CAUSAL_V2_COMPLETION_COVERAGE_PCT || 99.9))
+    );
     const complete =
       Number((summary as any)?.sampleCount || 0) > 0 &&
-      remaining === 0 &&
-      usableCoveragePct >= minUsableCoveragePct;
+      remaining <= maxPendingTail &&
+      usableCoveragePct >= completionCoveragePct;
     json(res, 200, {
       ...summary,
       calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
       minUsableCoveragePct,
+      completionCoveragePct,
+      maxPendingTail,
+      pendingTailRows:remaining,
+      boundedTailAccepted:complete && remaining > 0,
       complete,
       productionGateReady: complete,
       status: complete
-        ? "ready_for_strategy_revalidation"
-        : remaining > 0
+        ? (remaining > 0 ? "ready_with_bounded_pending_tail" : "ready_for_strategy_revalidation")
+        : remaining > maxPendingTail
           ? "rebuild_in_progress"
           : "insufficient_usable_causal_coverage"
     });
