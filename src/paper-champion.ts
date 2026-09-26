@@ -7,8 +7,8 @@ export interface ChampionCandidate {
   minutesRemaining: number;
 }
 
-export function chooseChampionCandidate(candidates: ChampionCandidate[]): ChampionCandidate | null {
-  const eligible=candidates
+export function rankChampionCandidates(candidates: ChampionCandidate[]): ChampionCandidate[] {
+  return candidates
     .filter(candidate=>
       Number.isFinite(candidate.entryPrice) &&
       candidate.entryPrice>=0.8 &&
@@ -29,7 +29,10 @@ export function chooseChampionCandidate(candidates: ChampionCandidate[]): Champi
       if (timeDelta) return timeDelta;
       return Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
     });
-  return eligible[0] || null;
+}
+
+export function chooseChampionCandidate(candidates: ChampionCandidate[]): ChampionCandidate | null {
+  return rankChampionCandidates(candidates)[0] || null;
 }
 
 export function championStakeUsd(input:{
