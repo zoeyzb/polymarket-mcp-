@@ -15,6 +15,7 @@ export interface ChampionSelectionOptions {
   minEmpiricalWinRatePct?: number;
   maxPicks?: number;
   maxPerFamily?: number;
+  excludedIds?: Set<string>;
 }
 
 function eligibleChampionCandidates(
@@ -25,6 +26,7 @@ function eligibleChampionCandidates(
   const minWinRate=Math.max(50,Math.min(100,Number(options.minEmpiricalWinRatePct ?? 95)));
 
   return candidates
+    .filter(candidate=>!options.excludedIds?.has(candidate.id))
     .filter(candidate=>{
       if (
         !Number.isFinite(candidate.entryPrice) ||
