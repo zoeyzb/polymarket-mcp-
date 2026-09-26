@@ -40,6 +40,18 @@ describe("sports observation ledger selection", () => {
     expect(rows[0]?.candidate.conditionId).toBe("a");
   });
 
+  it("skips already-observed market tokens so fresh evidence can fill the batch", () => {
+    const rows=selectObservationCandidates([
+      c("old","sports_total",0.9,10,5000),
+      c("fresh","sports_total",0.88,20,4000)
+    ],{
+      limit:10,
+      perFamilyLimit:10,
+      excludedKeys:new Set(["old:old-y"])
+    });
+    expect(rows.map(r=>r.candidate.conditionId)).toEqual(["fresh"]);
+  });
+
   it("rejects illiquid and out-of-band sports candidates", () => {
     const rows=selectObservationCandidates([
       c("lowliq","sports_total",0.9,60,20),
