@@ -29,6 +29,7 @@ export function createDbBackoff(options:DbBackoffOptions){
     },
     noteFailure(error:unknown,now=Date.now()){
       if(!isQuotaError(error)) return {opened:false};
+      if(retryAtMs>now) return {opened:true,coalesced:true,delayMs,retryAtMs,failures};
       failures+=1;
       delayMs=Math.min(maxMs,baseMs*(2**Math.max(0,failures-1)));
       retryAtMs=now+delayMs;
