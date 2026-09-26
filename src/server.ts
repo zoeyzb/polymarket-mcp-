@@ -245,6 +245,107 @@ async function getProductionStrategyPolicy(force = false) {
   return policy;
 }
 
+function candidateLiquidityCapacity(candidate: ScanCandidate) {
+  const books = Array.isArray(candidate.books) ? candidate.books : [];
+  const outcomes = books.map(book => {
+    const executions = Array.isArray(book.executions) ? book.executions : [];
+    const full = executions
+      .filter(execution => Number(execution.fillPct || 0) >= 99.9 && Number(execution.spendableUsd || 0) > 0)
+      .sort((a,b)=>Number(a.budgetUsd)-Number(b.budgetUsd));
+    const bestFull = full[full.length-1] || null;
+    const bestAsk = Number(book.bestAsk);
+    const avgFill = bestFull?.avgFillPrice == null ? null : Number(bestFull.avgFillPrice);
+    const slippageBps =
+      Number.isFinite(bestAsk) && bestAsk > 0 && avgFill !== null && Number.isFinite(avgFill)
+        ? Math.max(0, ((avgFill - bestAsk) / bestAsk) * 10_000)
+        : null;
+    return {
+      outcome:book.outcome,
+      tokenId:book.tokenId,
+      bestAsk:Number.isFinite(bestAsk) ? bestAsk : null,
+      askDepthUsdTop5:Number(book.askDepthUsdTop5 || 0),
+      maxTestedFullFillUsd:bestFull ? Number(bestFull.spendableUsd || bestFull.budgetUsd || 0) : 0,
+      avgFillPrice:avgFill,
+      slippageBps:slippageBps === null ? null : Number(slippageBps.toFixed(2)),
+      executionCurve:executions.map(execution => ({
+        budgetUsd:Number(execution.budgetUsd || 0),
+        spendableUsd:Number(execution.spendableUsd || 0),
+        fillPct:Number(execution.fillPct || 0),
+        avgFillPrice:execution.avgFillPrice == null ? null : Number(execution.avgFillPrice)
+      }))
+    };
+  });
+
+  const conservative = outcomes
+    .filter(outcome => outcome.bestAsk !== null)
+    .sort((a,b)=>b.maxTestedFullFillUsd-a.maxTestedFullFillUsd)[0] || null;
+
+  return {
+    conditionId:candidate.conditionId,
+    slug:candidate.slug,
+    question:candidate.question,
+    category:candidate.primaryCategory,
+    minutesRemaining:candidate.minutesRemaining,
+    liquidityUsd:candidate.liquidityUsd,
+    conservativeOutcome:conservative?.outcome ?? null,
+    conservativeTokenId:conservative?.tokenId ?? null,
+    maxTestedFullFillUsd:conservative?.maxTestedFullFillUsd ?? 0,
+    top5AskDepthUsd:conservative?.askDepthUsdTop5 ?? 0,
+    testedSlippageBps:conservative?.slippageBps ?? null,
+    outcomes
+  };
+}
+
+async function getLiquidityCapacity(lane: OpportunityLane, limit = 100) {
+  const latest = await getLatestMultiHorizonSnapshot();
+  if (!latest) {
+    return { generatedAt:null,lane,researchOnly:true,error:"no_scanner_snapshot_yet",markets:[] };
+  }
+
+  let candidates:ScanCandidate[] = [];
+  if (lane === "urgent_2h") candidates = latest.lanes?.urgent2h?.candidates || [];
+  else if (lane === "developing_6h") candidates = latest.lanes?.developing6h?.candidates || [];
+  else if (lane === "broader_24h") candidates = latest.lanes?.broader24h?.candidates || [];
+  else candidates = latest.structuralUniverse?.binary || [];
+
+  const policy = await getProductionStrategyPolicy().catch(() => null) as any;
+  const markets = candidates
+    .slice(0,Math.max(1,Math.min(500,limit)))
+    .map(candidateLiquidityCapacity)
+    .sort((a,b)=>b.maxTestedFullFillUsd-a.maxTestedFullFillUsd);
+
+  const totalMaxTestedFullFillUsd = markets.reduce((sum,row)=>sum+Number(row.maxTestedFullFillUsd||0),0);
+  const totalTop5AskDepthUsd = markets.reduce((sum,row)=>sum+Number(row.top5AskDepthUsd||0),0);
+  const byDomain:Record<string,{markets:number;maxTestedFullFillUsd:number;top5AskDepthUsd:number}> = {};
+  for(const row of markets){
+    const domain = strategyDomainForCategory(row.category);
+    const item = byDomain[domain] || {markets:0,maxTestedFullFillUsd:0,top5AskDepthUsd:0};
+    item.markets += 1;
+    item.maxTestedFullFillUsd += Number(row.maxTestedFullFillUsd||0);
+    item.top5AskDepthUsd += Number(row.top5AskDepthUsd||0);
+    byDomain[domain]=item;
+  }
+
+  return {
+    generatedAt:latest.generatedAt,
+    ageSeconds:latest.ageSeconds ?? null,
+    lane,
+    researchOnly:policy?.directionalProbabilityModelEnabled !== true,
+    policyGate:{
+      directionalProbabilityModelEnabled:policy?.directionalProbabilityModelEnabled === true,
+      enabledDomains:policy?.enabledDomains || [],
+      calibration:policy?.calibration || null
+    },
+    totals:{
+      markets:markets.length,
+      totalMaxTestedFullFillUsd:Number(totalMaxTestedFullFillUsd.toFixed(2)),
+      totalTop5AskDepthUsd:Number(totalTop5AskDepthUsd.toFixed(2))
+    },
+    byDomain,
+    markets
+  };
+}
+
 async function loadUnifiedOpportunities(lane: OpportunityLane, limit = 50) {
   const latest = await getLatestMultiHorizonSnapshot();
   if (!latest) return { generatedAt: null, lane, opportunities: [] };
@@ -1870,6 +1971,15 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/liquidity-capacity") {
+    const lane = normalizeOpportunityLane(url.searchParams.get("lane"));
+    json(res,200,await getLiquidityCapacity(
+      lane,
+      numberParam(url,"limit",100,1,500)
+    ));
+    return true;
+  }
+
   if (url.pathname === "/api/strategy-policy") {
     json(res, 200, await getProductionStrategyPolicy(url.searchParams.get("force") === "true"));
     return true;
@@ -1954,6 +2064,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       dashboard: "/dashboard",
       unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
       strategyPolicy: "/api/strategy-policy",
+      liquidityCapacity: "/api/liquidity-capacity?lane=urgent_2h&limit=100",
       calibrationHealth: "/api/calibration-health",
       historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
       opportunities: "/api/opportunities?minutes=120&limit=50",
