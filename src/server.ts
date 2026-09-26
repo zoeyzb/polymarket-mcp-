@@ -2038,6 +2038,8 @@ async function runWorkerHeartbeat() {
 }
 
 let backgroundScanRunning = false;
+let structuralScanRunning = false;
+let lastStructuralUniverse: Awaited<ReturnType<typeof scanMultiHorizon>>["structuralUniverse"] | null = null;
 let resolutionWorkerRunning = false;
 let streamPersistRunning = false;
 let quoteCompactionRunning = false;
@@ -2045,6 +2047,7 @@ let historicalBackfillRunning = false;
 let walletIntelligenceRunning = false;
 let maintenanceRunning = false;
 const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
+const STRUCTURAL_SCAN_SECONDS = Math.max(900, Number(process.env.STRUCTURAL_SCAN_SECONDS || 1800));
 const PERSIST_SCAN_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_SCAN_SECONDS || 300));
 const PERSIST_PACKET_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_PACKET_SECONDS || 300));
 const RESOLUTION_CHECK_SECONDS = Math.max(60, Number(process.env.RESOLUTION_CHECK_SECONDS || 300));
@@ -2072,8 +2075,14 @@ async function runBackgroundScan() {
       minLiquidity: 0,
       limitPerLane: 500,
       structuralLimit: 500,
-      bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50)
+      bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+      sourceMode: "near_term",
+      nearTermMinutes: 1440
     });
+
+    if (lastStructuralUniverse) {
+      multi.structuralUniverse = lastStructuralUniverse;
+    }
 
     // Persist the broad <=24h lane so historical evidence accumulates before markets
     // become urgent. Full-universe structural opportunities remain available in
@@ -2195,6 +2204,40 @@ async function runBackgroundScan() {
     }));
   } finally {
     backgroundScanRunning = false;
+  }
+}
+
+async function runStructuralScan() {
+  if (structuralScanRunning) return;
+  structuralScanRunning = true;
+  try {
+    const structural = await scanMultiHorizon({
+      minLiquidity: 0,
+      limitPerLane: 50,
+      structuralLimit: 500,
+      bufferBps: Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+      sourceMode: "full"
+    });
+    lastStructuralUniverse = structural.structuralUniverse;
+    console.log(JSON.stringify({
+      level:"info",
+      message:"structural_universe_scan",
+      totalActive:structural.totalActiveMarketsScanned,
+      structuralBinary:structural.structuralUniverse.binary.length,
+      structuralEventBaskets:structural.structuralUniverse.eventBaskets.length,
+      executableStructural:structural.structuralUniverse.executableCount,
+      scanDurationMs:structural.scanDurationMs,
+      at:new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      level:"error",
+      message:"structural_universe_scan_failed",
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+  } finally {
+    structuralScanRunning = false;
   }
 }
 
@@ -2606,6 +2649,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     setInterval(() => {
       runBackgroundScan().catch(() => {});
     }, BACKGROUND_SCAN_SECONDS * 1000).unref();
+
+    setTimeout(() => runStructuralScan().catch(() => {}), 15_000).unref();
+    setInterval(() => {
+      runStructuralScan().catch(() => {});
+    }, STRUCTURAL_SCAN_SECONDS * 1000).unref();
   }
 
   if (ROLE_HISTORY) {
