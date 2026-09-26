@@ -183,6 +183,7 @@ async function getProductionStrategyPolicy(force = false) {
         foldSummary:calendarWalk?.foldSummary ?? null,
         holdout:calendarWalk?.holdout ?? null,
         holdoutDaily:calendarWalk?.holdoutDaily ?? null,
+        diagnostics:calendarWalk?.diagnostics ?? null,
         requirements:calendarWalk?.requirements ?? null
       },
       sampleWalkForward:{
