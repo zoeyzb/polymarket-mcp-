@@ -109,7 +109,7 @@ import { buildResearchCandidateUniverse } from "./research-universe.js";
 import { chooseChampionCandidate, championStakeUsd } from "./paper-champion.js";
 import { chooseGrowthCandidate, growthStakeUsd } from "./paper-growth-challenge.js";
 import { selectObservationCandidates } from "./paper-observation.js";
-import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
+import { createEphemeralPaperTrade, getEphemeralOpenTrades, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -177,7 +177,7 @@ async function getPaperTradingApiSnapshot(limit:number) {
       getPaperTradingFamilyStats("calendar_walk_forward_").catch(()=>[]),
       getPaperTradingFamilyStats("research_shadow_").catch(()=>[]),
       getPaperTradingConfidenceStats("research_shadow_").catch(()=>getEphemeralConfidenceStats("research_shadow_")),
-      listPaperTrades(bounded).catch(()=>getEphemeralOpenTrades(bounded))
+      listPaperTrades(bounded).catch(()=>listEphemeralPaperTrades(bounded))
     ]);
     const researchPortfolios=Object.fromEntries(
       ["ultra_high","high","exploratory"].map(band=>{
@@ -3312,6 +3312,7 @@ async function runEphemeralResearchPaperWorker() {
       storage:"memory_only",
       decision:championDecision,
       portfolioBefore:portfolio,
+      daily:getEphemeralDailyStats("champion_100_"),
       candidateCount:availableChoices.length,
       at:new Date().toISOString()
     }));
@@ -3373,6 +3374,7 @@ async function runEphemeralResearchPaperWorker() {
       storage:"memory_only",
       decision:growthDecision,
       portfolioBefore:portfolio,
+      daily:getEphemeralDailyStats("growth_100_"),
       candidateCount:availableChoices.length,
       dailyTargets:{
         target500Usd:{requiredReturnPct:400},
@@ -3436,6 +3438,7 @@ async function runEphemeralResearchPaperWorker() {
       perFamilyLimit:SPORTS_OBSERVATION_PER_FAMILY,
       familyInserted,
       stats:getEphemeralPaperStats("observation_sports_"),
+      daily:getEphemeralDailyStats("observation_sports_"),
       at:new Date().toISOString()
     }));
   }
@@ -3478,9 +3481,13 @@ async function settleEphemeralPaperTrades() {
       openChecked:open.length,
       resolved,
       champion:getEphemeralPaperStats("champion_100_"),
+      championDaily:getEphemeralDailyStats("champion_100_"),
       growth:getEphemeralPaperStats("growth_100_"),
+      growthDaily:getEphemeralDailyStats("growth_100_"),
       observation:getEphemeralPaperStats("observation_sports_"),
+      observationDaily:getEphemeralDailyStats("observation_sports_"),
       research:getEphemeralPaperStats("research_shadow_"),
+      researchDaily:getEphemeralDailyStats("research_shadow_"),
       at:new Date().toISOString()
     }));
   }
