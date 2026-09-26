@@ -2949,6 +2949,38 @@ export async function getPaperTradingStats(strategyPrefix = "") {
   };
 }
 
+export async function getPaperTradingConfidenceStats(strategyPrefix = "research_shadow_") {
+  if(!pool) return [];
+  await ensurePaperTradingSchema();
+  const like=String(strategyPrefix||"")+"%";
+  const {rows}=await pool.query(`
+    select
+      coalesce(nullif(policy_snapshot->>'confidenceBand',''),'legacy') as "confidenceBand",
+      count(*) filter (where status <> 'VOID')::int as trades,
+      count(*) filter (where status='OPEN')::int as "openTrades",
+      count(*) filter (where status='WIN')::int as wins,
+      count(*) filter (where status='LOSS')::int as losses,
+      coalesce(sum(stake_usd) filter (where status='OPEN'),0)::float8 as "openExposureUsd",
+      coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd",
+      coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd"
+    from polymarket_brain.paper_trades
+    where strategy_id like $1
+    group by 1
+    order by "confidenceBand"
+  `,[like]);
+  return rows.map(row=>{
+    const resolved=Number(row.wins||0)+Number(row.losses||0);
+    const stake=Number(row.resolvedStakeUsd||0);
+    const net=Number(row.netPnlUsd||0);
+    return {
+      ...row,
+      resolvedTrades:resolved,
+      winRatePct:resolved ? Number(((Number(row.wins||0)/resolved)*100).toFixed(3)) : null,
+      aggregateRoiPct:stake>0 ? Number(((net/stake)*100).toFixed(3)) : null
+    };
+  });
+}
+
 export async function getPaperTradingFamilyStats(strategyPrefix = "research_shadow_") {
   if(!pool) return [];
   await ensurePaperTradingSchema();
