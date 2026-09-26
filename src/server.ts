@@ -3346,15 +3346,20 @@ async function runEphemeralResearchPaperWorker() {
       realizedNetPnlUsd:Number(stats.netPnlUsd||0),
       openExposureUsd:Number(stats.openExposureUsd||0)
     });
+    const growthOpenTrades=(getEphemeralOpenTrades(500) as any[])
+      .filter(trade=>String(trade.strategyId||"").startsWith("growth_100_"));
     const growthOpenKeys=new Set(
-      (getEphemeralOpenTrades(500) as any[])
-        .filter(trade=>String(trade.strategyId||"").startsWith("growth_100_"))
-        .map(trade=>`${trade.conditionId}:${trade.tokenId}`)
+      growthOpenTrades.map(trade=>`${trade.conditionId}:${trade.tokenId}`)
     );
-    const availableGrowthChoices=growthChoices.filter(choice=>!growthOpenKeys.has(choice.id));
-    const pick=chooseGrowthCandidate(availableGrowthChoices);
+    const growthOpenFamilies=new Set(
+      growthOpenTrades.map(trade=>String(trade.family||"")).filter(Boolean)
+    );
+    const pick=chooseGrowthCandidate(growthChoices,{
+      excludedIds:growthOpenKeys,
+      excludedFamilies:growthOpenFamilies
+    });
     if(pick && Number(stats.openTrades||0)<GROWTH_PAPER_MAX_OPEN_TRADES){
-      const choice=availableGrowthChoices.find(item=>item.id===pick.id);
+      const choice=growthChoices.find(item=>item.id===pick.id);
       const stake=growthStakeUsd({
         currentBankrollUsd:portfolio.currentBankrollUsd,
         availableCashUsd:portfolio.availableCashUsd,
@@ -3395,7 +3400,7 @@ async function runEphemeralResearchPaperWorker() {
       decision:growthDecision,
       portfolioBefore:portfolio,
       daily:getEphemeralDailyStats("growth_100_"),
-      candidateCount:availableGrowthChoices.length,
+      candidateCount:growthChoices.length,\n      excludedOpenFamilies:[...growthOpenFamilies],
       dailyTargets:{
         target500Usd:{requiredReturnPct:400},
         target1000Usd:{requiredReturnPct:900},
