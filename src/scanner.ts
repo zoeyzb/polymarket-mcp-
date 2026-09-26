@@ -35,7 +35,8 @@ import type {
   ScanCandidate,
   ScanResult,
   MultiHorizonScanResult,
-  MultiHorizonLane
+  MultiHorizonLane,
+  StructuralScanDiagnostics
 } from "./types.js";
 
 const BUDGETS = [10, 25, 50, 100, 250, 500, 1000];
@@ -286,7 +287,8 @@ async function buildEventBasketOpportunities(
   now: number,
   cutoff: number,
   allBooks: Map<string, NormalizedBook> | null,
-  bufferBps: number
+  bufferBps: number,
+  diagnostics?: StructuralScanDiagnostics
 ): Promise<EventBasketOpportunity[]> {
   const groups = new Map<string, { title: string | null; negRisk: boolean; augmented: boolean; markets: GammaMarket[] }>();
 
@@ -301,9 +303,10 @@ async function buildEventBasketOpportunities(
     groups.set(meta.id, current);
   }
 
+  if (diagnostics) diagnostics.eventGroupsBuilt = groups.size;
   const results: EventBasketOpportunity[] = [];
   for (const [eventId, group] of groups) {
-    if (!group.negRisk || group.augmented || group.markets.length < 3) continue;
+    if (!group.negRisk || group.augmented || group.markets.length < 3) { if (diagnostics) diagnostics.rejectedGroupShape += 1; continue; }
 
     // Cheap full-universe prefilter: only spend authoritative-event and CLOB calls
     // on sets whose displayed YES prices are close enough to a complete-set edge.
@@ -315,7 +318,7 @@ async function buildEventBasketOpportunities(
         1,
         Number(process.env.NEGRISK_DISPLAYED_PREFILTER_MAX || 1.03)
       );
-      if (displayedTotal > prefilterCeiling) continue;
+      if (displayedTotal > prefilterCeiling) { if (diagnostics) diagnostics.rejectedDisplayedPrefilter += 1; continue; }
     }
 
     const completeWindow = group.markets.every(market => {
@@ -324,19 +327,19 @@ async function buildEventBasketOpportunities(
       const ts = Date.parse(end);
       return ts >= now && ts <= cutoff && market.active !== false && market.closed !== true && market.acceptingOrders !== false;
     });
-    if (!completeWindow) continue;
+    if (!completeWindow) { if (diagnostics) diagnostics.rejectedWindow += 1; continue; }
 
     const authoritativeEvent = await getEventById(eventId);
-    if (!authoritativeEvent) continue;
-    if (authoritativeEvent.negRisk !== true && authoritativeEvent.enableNegRisk !== true) continue;
-    if (authoritativeEvent.negRiskAugmented === true) continue;
+    if (!authoritativeEvent) { if (diagnostics) diagnostics.rejectedAuthoritativeEvent += 1; continue; }
+    if (authoritativeEvent.negRisk !== true && authoritativeEvent.enableNegRisk !== true) { if (diagnostics) diagnostics.rejectedAuthoritativeMetadata += 1; continue; }
+    if (authoritativeEvent.negRiskAugmented === true) { if (diagnostics) diagnostics.rejectedAuthoritativeMetadata += 1; continue; }
 
     const authoritativeMarkets = Array.isArray(authoritativeEvent.markets)
       ? authoritativeEvent.markets.filter(
           (market): market is Record<string, unknown> => Boolean(market) && typeof market === "object"
         )
       : [];
-    if (authoritativeMarkets.length < 3) continue;
+    if (authoritativeMarkets.length < 3) { if (diagnostics) diagnostics.rejectedComposition += 1; continue; }
 
     const identity = (market: Record<string, unknown>) =>
       String(market.id ?? market.conditionId ?? market.slug ?? "");
@@ -349,7 +352,8 @@ async function buildEventBasketOpportunities(
     if (
       localIds.length !== authoritativeIds.length ||
       localIds.some((id, index) => id !== authoritativeIds[index])
-    ) {
+) {
+      if (diagnostics) diagnostics.rejectedComposition += 1;
       continue;
     }
 
@@ -372,18 +376,18 @@ async function buildEventBasketOpportunities(
         yesTokenId(market) !== null
       );
     });
-    if (!authoritativeComplete) continue;
+    if (!authoritativeComplete) { if (diagnostics) diagnostics.rejectedComposition += 1; continue; }
 
     const authoritativeGamma = authoritativeMarkets as GammaMarket[];
     const yesTokens = authoritativeGamma.map(yesTokenId);
-    if (yesTokens.some((token): token is null => token === null)) continue;
+    if (yesTokens.some((token): token is null => token === null)) { if (diagnostics) diagnostics.rejectedComposition += 1; continue; }
     const tokenIds = yesTokens as string[];
     const groupBooks = allBooks
       ? tokenIds.map(token => allBooks.get(token)).filter((book): book is NormalizedBook => Boolean(book))
       : [...(await getOrderBooks(tokenIds)).values()];
     const byToken = new Map(groupBooks.map(book => [book.tokenId, book]));
     const books = tokenIds.map(token => byToken.get(token)).filter((book): book is NormalizedBook => Boolean(book));
-    if (books.length !== tokenIds.length) continue;
+    if (books.length !== tokenIds.length) { if (diagnostics) diagnostics.rejectedBooks += 1; continue; }
 
     const topAskTotal = books.reduce((sum, book) => sum + (book.bestAsk ?? 1), 0);
     const executable = BUDGETS.map(budget => calculateCompleteOutcomeBasket(books, budget, bufferBps));
@@ -391,7 +395,7 @@ async function buildEventBasketOpportunities(
       .filter(x => x.fillComplete && x.netProfitUsd > 0 && (x.netRoiPct ?? 0) > 0)
       .sort((a, b) => b.netProfitUsd - a.netProfitUsd || (b.netRoiPct ?? 0) - (a.netRoiPct ?? 0));
 
-    if (topAskTotal >= 1 && positive.length === 0) continue;
+    if (topAskTotal >= 1 && positive.length === 0) { if (diagnostics) diagnostics.rejectedEconomics += 1; continue; }
 
     const best = positive[0] ?? null;
     results.push({
@@ -414,6 +418,7 @@ async function buildEventBasketOpportunities(
     });
   }
 
+  if (diagnostics) diagnostics.eventBasketsReturned = results.length;
   return results.sort((a, b) =>
     b.bestNetProfitUsd - a.bestNetProfitUsd ||
     (b.bestNetRoiPct ?? 0) - (a.bestNetRoiPct ?? 0)
@@ -1372,12 +1377,28 @@ export async function scanMultiHorizon(options?: {
     .sort(compareDiscovery)
     .slice(0, structuralLimit);
 
+  const structuralDiagnostics:StructuralScanDiagnostics = {
+    negRiskMarketsSeen:negRiskMarkets.length,
+    eventGroupsBuilt:0,
+    rejectedGroupShape:0,
+    rejectedDisplayedPrefilter:0,
+    rejectedWindow:0,
+    rejectedAuthoritativeEvent:0,
+    rejectedAuthoritativeMetadata:0,
+    rejectedComposition:0,
+    rejectedBooks:0,
+    rejectedEconomics:0,
+    eventBasketsReturned:0,
+    binaryExecutable:structuralBinary.filter(candidate=>candidate.opportunityClass==="executable_structural").length,
+    binaryTopBookOnly:structuralBinary.filter(candidate=>candidate.opportunityClass==="top_book_structural_only").length
+  };
   const eventBaskets = await buildEventBasketOpportunities(
     negRiskMarkets,
     now,
     latestEndTs,
     null,
-    bufferBps
+    bufferBps,
+    structuralDiagnostics
   );
 
   const sportsLineViolations = findSportsLineViolations(retained);
@@ -1476,7 +1497,8 @@ export async function scanMultiHorizon(options?: {
         eventBaskets.filter(basket =>
           basket.bestNetProfitUsd <= 0 &&
           basket.flags.includes("top_book_complete_set_edge")
-        ).length
+        ).length,
+      diagnostics:structuralDiagnostics
     },
     logicalViolations,
     sportsLineViolations
