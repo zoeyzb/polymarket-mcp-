@@ -39,6 +39,16 @@ describe("classifyMarketFamily", () => {
     })).toBe("sports_player_prop");
   });
 
+  it("maps parsed team totals to the team-total family", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Iceland vs. Estonia: Estonia O/U 2.5",
+      outcomeCount:2,
+      sportsKind:"team_total",
+      sportsScope:"full_game"
+    })).toBe("sports_team_total");
+  });
+
   it("does not mistake ISO dates in moneyline questions for score bands", () => {
     expect(classifyMarketFamily({
       domain:"sports",
