@@ -149,7 +149,7 @@ function detectStat(text: string) {
   const stats = [
     "points","goals","runs","hits","rebounds","assists","yards","touchdowns",
     "passing yards","rushing yards","receiving yards","strikeouts","home runs",
-    "shots","saves","kills","aces","double faults","maps","rounds"
+    "shots","saves","kills","aces","double faults","maps","rounds","corners"
   ];
   return stats.find(stat => text.toLowerCase().includes(stat)) ?? null;
 }
@@ -159,11 +159,17 @@ function detectTeamTotalSubject(question:string,eventTitle:string|null) {
   if(!match) return null;
   const subject=match[1].trim();
   if(!subject) return null;
-  const participants=String(eventTitle||"")
-    .split(/\s+(?:vs\.?|versus|v\.)\s+/i)
-    .map(x=>x.trim())
-    .filter(Boolean);
+
+  const questionMatchup=question.split(":")[0]?.trim() || "";
+  const matchupSources=[String(eventTitle||""),questionMatchup].filter(Boolean);
+  const participants=matchupSources.flatMap(source=>
+    source
+      .split(/\s+(?:vs\.?|versus|v\.)\s+/i)
+      .map(x=>x.trim())
+      .filter(Boolean)
+  );
   if(participants.length<2) return null;
+
   const normalized=(value:string)=>value.toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
   const needle=normalized(subject);
   return participants.some(team=>{

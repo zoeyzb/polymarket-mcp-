@@ -107,6 +107,18 @@ describe("sports market structure", () => {
     expect(result?.line).toBe(2.5);
   });
 
+  it("classifies team-specific corners O/U as a team total even without matching event title", () => {
+    const result = classifySportsMarketStructure(market({
+      question: "England vs. Spain: Spain O/U 2.5 Corners",
+      sportsMarketType: "",
+      events: [{ title: "Women's international soccer", gameId: 12346 }]
+    }));
+    expect(result?.kind).toBe("team_total");
+    expect(result?.subject).toBe("Spain");
+    expect(result?.stat).toBe("corners");
+    expect(result?.line).toBe(2.5);
+  });
+
   it("classifies leading at halftime as a first-half moneyline", () => {
     const result = classifySportsMarketStructure(market({
       question: "Vitesse Arnhem leading at halftime?",
