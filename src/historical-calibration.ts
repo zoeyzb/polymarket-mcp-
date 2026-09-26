@@ -121,6 +121,86 @@ export function latestPriceAtOrBefore(
   return best?.p ?? null;
 }
 
+export interface StoredHistoricalCalibrationRef {
+  conditionId: string;
+  marketId: string | null;
+  slug: string | null;
+  question: string;
+  domain: HistoricalDomain;
+  resolvedAt: string;
+  outcome0: string;
+  outcome1: string;
+  actualOutcome0: 0 | 1;
+  winningOutcome: string;
+  token0Id: string;
+}
+
+export async function rebuildHistoricalCalibrationSampleFromStored(
+  ref: StoredHistoricalCalibrationRef
+): Promise<HistoricalCalibrationSample | null> {
+  if (
+    !ref.conditionId ||
+    !ref.question ||
+    !ref.resolvedAt ||
+    !ref.token0Id ||
+    !ref.outcome0 ||
+    !ref.outcome1 ||
+    (ref.actualOutcome0 !== 0 && ref.actualOutcome0 !== 1)
+  ) {
+    return null;
+  }
+
+  const resolvedTs = Math.floor(Date.parse(ref.resolvedAt) / 1000);
+  if (!Number.isFinite(resolvedTs)) return null;
+
+  const historyPayload = await getPriceHistoryRange(
+    ref.token0Id,
+    resolvedTs - 150 * 60,
+    resolvedTs,
+    5
+  ).catch(() => null);
+
+  if (!historyPayload) return null;
+  const points = parseHistory(historyPayload);
+  if (!points.length) return null;
+
+  const prices: Record<string, number> = {};
+  const brier: Record<string, number> = {};
+
+  for (const horizon of HORIZONS_MINUTES) {
+    const probability = latestPriceAtOrBefore(points, resolvedTs - horizon * 60);
+    if (probability === null) continue;
+    const key = `tMinus${horizon}m`;
+    prices[key] = Number(probability.toFixed(6));
+    brier[key] = Number(Math.pow(probability - ref.actualOutcome0, 2).toFixed(8));
+  }
+
+  if (Object.keys(prices).length < 2) return null;
+
+  return {
+    conditionId: ref.conditionId,
+    marketId: ref.marketId,
+    slug: ref.slug,
+    question: ref.question,
+    domain: ref.domain,
+    resolvedAt: ref.resolvedAt,
+    outcome0: ref.outcome0,
+    outcome1: ref.outcome1,
+    actualOutcome0: ref.actualOutcome0,
+    winningOutcome: ref.winningOutcome,
+    token0Id: ref.token0Id,
+    prices,
+    brier,
+    sourcePayload: {
+      calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
+      samplingMethod: "latest_at_or_before_target",
+      finalOutcomePrices: [],
+      horizonsMinutes: [...HORIZONS_MINUTES],
+      availableHorizons: Object.keys(prices)
+    }
+  };
+}
+
 export async function buildHistoricalCalibrationSample(
   market: GammaMarket
 ): Promise<HistoricalCalibrationSample | null> {
