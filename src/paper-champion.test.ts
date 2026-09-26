@@ -42,7 +42,7 @@ describe("paper champion selection", () => {
       {id:"open",domain:"sports",family:"sports_score_band",entryPrice:0.985,liquidityUsd:5000,minutesRemaining:20},
       {id:"fresh",domain:"sports",family:"sports_total",entryPrice:0.94,liquidityUsd:5000,minutesRemaining:30}
     ];
-    const picks=chooseChampionPortfolio(candidates.filter(c=>c.id!=="open"),{maxPicks:4,maxPerFamily:1});
+    const picks=chooseChampionPortfolio(candidates,{maxPicks:4,maxPerFamily:1,excludedIds:new Set(["open"])});
     expect(picks.map(p=>p.id)).toEqual(["fresh"]);
   });
 
