@@ -131,3 +131,41 @@ export function getEphemeralFamilyStats(prefix="research_shadow_"){
     };
   }).sort((a,b)=>b.resolvedTrades-a.resolvedTrades || Number(b.winRatePct||0)-Number(a.winRatePct||0));
 }
+
+
+export function listEphemeralPaperTrades(limit=500,prefix=""){
+  const bounded=Math.max(1,Math.min(5000,Number(limit||500)));
+  const rows=prefix ? trades.filter(t=>t.strategyId.startsWith(prefix)) : [...trades];
+  return rows
+    .slice()
+    .sort((a,b)=>Date.parse(b.entryAt)-Date.parse(a.entryAt) || b.id-a.id)
+    .slice(0,bounded);
+}
+
+export function getEphemeralDailyStats(prefix="",day=new Date().toISOString().slice(0,10)){
+  const rows=trades.filter(t=>
+    (!prefix || t.strategyId.startsWith(prefix)) &&
+    t.entryAt.slice(0,10)===day
+  );
+  const resolved=rows.filter(t=>t.status==="WIN"||t.status==="LOSS");
+  const wins=resolved.filter(t=>t.status==="WIN").length;
+  const losses=resolved.filter(t=>t.status==="LOSS").length;
+  const open=rows.filter(t=>t.status==="OPEN");
+  const netPnlUsd=resolved.reduce((sum,t)=>sum+Number(t.netPnlUsd||0),0);
+  const resolvedStakeUsd=resolved.reduce((sum,t)=>sum+t.stakeUsd,0);
+  return {
+    configured:true,
+    ephemeral:true,
+    day,
+    trades:rows.length,
+    openTrades:open.length,
+    wins,
+    losses,
+    resolvedTrades:resolved.length,
+    openExposureUsd:Math.round(open.reduce((sum,t)=>sum+t.stakeUsd,0)*1e6)/1e6,
+    netPnlUsd:Math.round(netPnlUsd*1e6)/1e6,
+    resolvedStakeUsd:Math.round(resolvedStakeUsd*1e6)/1e6,
+    winRatePct:resolved.length ? Math.round((wins/resolved.length)*100000)/1000 : null,
+    aggregateRoiPct:resolvedStakeUsd>0 ? Math.round((netPnlUsd/resolvedStakeUsd)*100000)/1000 : null
+  };
+}
