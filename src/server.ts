@@ -3108,12 +3108,21 @@ async function runPaperEntryWorker() {
 
       const horizonMatch=strategyId.match(/_(tMinus(?:15|30|60|120)m)$/);
       const storedHorizon=horizonMatch?.[1] as StrategyHorizon | undefined;
-      if (!storedHorizon || policy?.perDomain?.[effectiveDomain]?.horizons?.[storedHorizon]?.enabled !== true) {
+      const storedFamily=String(trade.policySnapshot?.marketFamily || "");
+      const storedFamilyPolicy=policy?.perDomain?.[effectiveDomain]?.families?.[storedFamily];
+      if (
+        !storedFamily ||
+        !storedHorizon ||
+        storedFamilyPolicy?.enabled !== true ||
+        storedFamilyPolicy?.horizons?.[storedHorizon]?.enabled !== true
+      ) {
         const result=await voidPaperTrade(
           trade.id,
-          storedHorizon
-            ? `production_horizon_disabled:${effectiveDomain}:${storedHorizon}`
-            : "unknown_or_legacy_horizon"
+          !storedFamily
+            ? "unknown_or_legacy_market_family"
+            : storedHorizon
+              ? `production_family_horizon_disabled:${effectiveDomain}:${storedFamily}:${storedHorizon}`
+              : "unknown_or_legacy_horizon"
         ).catch(() => null);
         if ((result as any)?.updated) voidedHorizonMismatches += 1;
       }
