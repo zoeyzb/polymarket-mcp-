@@ -95,6 +95,7 @@ export interface DailyGrowthScoreInput {
   minRoiPct: number;
   avgRoiPct: number;
   totalTrades: number;
+  avgHitRatePct: number;
   profitableDayPct: number;
   medianDailyPnlPerDollar: number;
   avgDailyPnlPerDollar: number;
@@ -104,6 +105,7 @@ export interface DailyGrowthScoreInput {
 }
 
 export function scoreDailyGrowthPolicy(input: DailyGrowthScoreInput) {
+  const hitRateReward=Math.max(0,input.avgHitRatePct-95)*1.5;
   const profitableDayReward=Math.max(0,input.profitableDayPct)*0.4;
   const medianGrowthReward=input.medianDailyPnlPerDollar*100*3;
   const averageGrowthReward=input.avgDailyPnlPerDollar*100;
@@ -113,10 +115,11 @@ export function scoreDailyGrowthPolicy(input: DailyGrowthScoreInput) {
   const worstDayPenalty=Math.max(0,-input.worstDayPnlPerDollar)*100*4;
   const concurrencyPenalty=Math.max(0,input.peakConcurrentTrades-3)*1.5;
   const riskPenalty=drawdownPenalty+worstDayPenalty+concurrencyPenalty;
-  const score=profitableDayReward+medianGrowthReward+averageGrowthReward+floorReward+activityReward-riskPenalty;
+  const score=hitRateReward+profitableDayReward+medianGrowthReward+averageGrowthReward+floorReward+activityReward-riskPenalty;
   return {
     score:round(score,6),
     components:{
+      hitRateReward:round(hitRateReward,6),
       profitableDayReward:round(profitableDayReward,6),
       medianGrowthReward:round(medianGrowthReward,6),
       averageGrowthReward:round(averageGrowthReward,6),
@@ -1089,6 +1092,7 @@ export function runCalendarWalkForwardEdgeBacktest(
       const minRoi=Math.min(...rois);
       const avgRoi=rois.reduce((a,b)=>a+b,0)/rois.length;
       const totalTrades=folds.reduce((sum,f)=>sum+f.trades,0);
+      const avgHitRatePct=folds.reduce((sum,f)=>sum+Number(f.hitRatePct||0),0)/folds.length;
       const profitableDayPct=folds.reduce((sum,f)=>sum+Number(f.daily.profitableDayPct||0),0)/folds.length;
       const dailyMedians=folds.map(f=>Number(f.daily.medianPnlPerDollarStakePerDay||0));
       const medianDailyPnlPerDollar=Number(median(dailyMedians)||0);
@@ -1100,6 +1104,7 @@ export function runCalendarWalkForwardEdgeBacktest(
         minRoiPct:minRoi,
         avgRoiPct:avgRoi,
         totalTrades,
+        avgHitRatePct,
         profitableDayPct,
         medianDailyPnlPerDollar,
         avgDailyPnlPerDollar,
