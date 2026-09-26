@@ -381,29 +381,34 @@ export async function compactRealtimeQuotes(minutesBack = 180) {
 
 export async function cleanupRawStreams(
   quoteRetentionHours = 72,
-  sportsRetentionDays = 30
+  sportsRetentionDays = 30,
+  options?: {
+    candidateRetentionDays?: number;
+    scanRetentionDays?: number;
+    packetRetentionDays?: number;
+    oneMinuteBarRetentionDays?: number;
+    crossVenueRetentionDays?: number;
+    snapshotKeepCount?: number;
+  }
 ) {
   if (!pool) return { configured: false, reason: "not_configured" };
 
   const quoteHours = Math.max(24, Math.min(720, quoteRetentionHours));
   const sportDays = Math.max(7, Math.min(365, sportsRetentionDays));
+  const candidateDays = Math.max(3, Math.min(90, Number(options?.candidateRetentionDays ?? 14)));
+  const scanDays = Math.max(3, Math.min(90, Number(options?.scanRetentionDays ?? 14)));
+  const packetDays = Math.max(7, Math.min(180, Number(options?.packetRetentionDays ?? 30)));
+  const oneMinuteDays = Math.max(3, Math.min(90, Number(options?.oneMinuteBarRetentionDays ?? 21)));
+  const crossVenueDays = Math.max(7, Math.min(180, Number(options?.crossVenueRetentionDays ?? 30)));
+  const snapshotKeepCount = Math.max(2, Math.min(50, Number(options?.snapshotKeepCount ?? 10)));
   const startedAt = new Date().toISOString();
 
-  const run = await pool.query<{ id: string }>(
-    `insert into polymarket_brain.maintenance_runs (job, started_at, details)
-     values ('raw_stream_cleanup', now(), $1::jsonb)
-     returning id`,
-    [JSON.stringify({ quoteRetentionHours: quoteHours, sportsRetentionDays: sportDays })]
-  );
-  const runId = run.rows[0]?.id ?? null;
-
   try {
+    // Delete disposable/high-volume rows first. Logging the maintenance run after
+    // reclamation prevents a full database from blocking the cleanup itself.
     const quoteDelete = await pool.query(
-      `delete from polymarket_brain.realtime_quotes rq
-       using polymarket_brain.quote_bars_1m bar
-       where rq.token_id = bar.token_id
-         and date_trunc('minute', rq.observed_at) = bar.minute
-         and rq.observed_at < now() - ($1 || ' hours')::interval`,
+      `delete from polymarket_brain.realtime_quotes
+       where observed_at < now() - ($1 || ' hours')::interval`,
       [quoteHours]
     );
 
@@ -413,37 +418,95 @@ export async function cleanupRawStreams(
       [sportDays]
     );
 
+    const candidateDelete = await pool.query(
+      `delete from polymarket_brain.candidates
+       where generated_at < now() - ($1 || ' days')::interval`,
+      [candidateDays]
+    );
+
+    // Event baskets share scan_id references and need to be removed before scans
+    // in deployments where the FK is not configured with ON DELETE CASCADE.
+    const basketDelete = await pool.query(
+      `delete from polymarket_brain.event_baskets
+       where generated_at < now() - ($1 || ' days')::interval`,
+      [scanDays]
+    );
+
+    const scanDelete = await pool.query(
+      `delete from polymarket_brain.scans
+       where generated_at < now() - ($1 || ' days')::interval`,
+      [scanDays]
+    );
+
+    const packetDelete = await pool.query(
+      `delete from polymarket_brain.opportunity_packets
+       where generated_at < now() - ($1 || ' days')::interval`,
+      [packetDays]
+    );
+
+    const crossVenueDelete = await pool.query(
+      `delete from polymarket_brain.cross_venue_matches
+       where observed_at < now() - ($1 || ' days')::interval`,
+      [crossVenueDays]
+    );
+
+    const oneMinuteDelete = await pool.query(
+      `delete from polymarket_brain.quote_bars_1m
+       where minute < now() - ($1 || ' days')::interval`,
+      [oneMinuteDays]
+    );
+
+    const snapshotDelete = await pool.query(
+      `delete from polymarket_brain.multi_horizon_snapshots
+       where generated_at < (
+         select generated_at
+         from polymarket_brain.multi_horizon_snapshots
+         order by generated_at desc
+         offset $1 limit 1
+       )`,
+      [snapshotKeepCount - 1]
+    );
+
     const result = {
       configured: true,
       startedAt,
       finishedAt: new Date().toISOString(),
       quoteRetentionHours: quoteHours,
       sportsRetentionDays: sportDays,
+      candidateRetentionDays: candidateDays,
+      scanRetentionDays: scanDays,
+      packetRetentionDays: packetDays,
+      oneMinuteBarRetentionDays: oneMinuteDays,
+      crossVenueRetentionDays: crossVenueDays,
+      snapshotKeepCount,
       deletedRealtimeQuotes: quoteDelete.rowCount ?? 0,
-      deletedSportsEvents: sportsDelete.rowCount ?? 0
+      deletedSportsEvents: sportsDelete.rowCount ?? 0,
+      deletedCandidates: candidateDelete.rowCount ?? 0,
+      deletedEventBaskets: basketDelete.rowCount ?? 0,
+      deletedScans: scanDelete.rowCount ?? 0,
+      deletedOpportunityPackets: packetDelete.rowCount ?? 0,
+      deletedCrossVenueMatches: crossVenueDelete.rowCount ?? 0,
+      deletedQuoteBars1m: oneMinuteDelete.rowCount ?? 0,
+      deletedSnapshots: snapshotDelete.rowCount ?? 0
     };
 
-    if (runId) {
-      await pool.query(
-        `update polymarket_brain.maintenance_runs
-         set finished_at = now(), details = details || $2::jsonb
-         where id = $1`,
-        [runId, JSON.stringify(result)]
-      );
-    }
+    // Best-effort maintenance logging. Failure to write the log must never make
+    // a successful reclamation run look failed.
+    await pool.query(
+      `insert into polymarket_brain.maintenance_runs (job, started_at, finished_at, details)
+       values ('raw_stream_cleanup', $1::timestamptz, now(), $2::jsonb)`,
+      [startedAt, JSON.stringify(result)]
+    ).catch(() => {});
 
     return result;
   } catch (error) {
-    if (runId) {
-      await pool.query(
-        `update polymarket_brain.maintenance_runs
-         set finished_at = now(), details = details || $2::jsonb
-         where id = $1`,
-        [runId, JSON.stringify({
-          error: error instanceof Error ? error.message : String(error)
-        })]
-      ).catch(() => {});
-    }
+    await pool.query(
+      `insert into polymarket_brain.maintenance_runs (job, started_at, finished_at, details)
+       values ('raw_stream_cleanup', $1::timestamptz, now(), $2::jsonb)`,
+      [startedAt, JSON.stringify({
+        error: error instanceof Error ? error.message : String(error)
+      })]
+    ).catch(() => {});
     throw error;
   }
 }
@@ -1975,7 +2038,7 @@ export async function persistMultiHorizonSnapshot(
        select generated_at
        from polymarket_brain.multi_horizon_snapshots
        order by generated_at desc
-       offset 99 limit 1
+       offset 9 limit 1
      )`
   ).catch(() => {});
 
