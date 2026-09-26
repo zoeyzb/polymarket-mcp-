@@ -27,8 +27,28 @@ interface EphemeralPaperTrade extends EphemeralPaperTradeInput {
   realizedRoiPct:number|null;
 }
 
+export interface StructuralBasketPaperInput {
+  eventId:string;
+  eventTitle:string|null;
+  marketCount:number;
+  yesTokenIds:string[];
+  budgetUsd:number;
+  netProfitUsd:number;
+  netRoiPct:number;
+}
+
+interface StructuralBasketPaperObservation extends StructuralBasketPaperInput {
+  id:number;
+  firstSeenAt:string;
+  lastSeenAt:string;
+  sightings:number;
+  bestNetProfitUsd:number;
+  bestNetRoiPct:number;
+}
+
 let nextId=1;
 let trades:EphemeralPaperTrade[]=[];
+let structuralBaskets:StructuralBasketPaperObservation[]=[];
 let persistencePath:string|null=null;
 let persistenceLoadedAt:string|null=null;
 let persistenceLastWriteAt:string|null=null;
@@ -57,16 +77,33 @@ function validTrade(value:any): value is EphemeralPaperTrade {
   );
 }
 
+function validStructuralBasket(value:any): value is StructuralBasketPaperObservation {
+  return Boolean(
+    value &&
+    Number.isFinite(Number(value.id)) &&
+    typeof value.eventId==="string" &&
+    Number.isFinite(Number(value.marketCount)) &&
+    Array.isArray(value.yesTokenIds) &&
+    Number.isFinite(Number(value.budgetUsd)) &&
+    Number.isFinite(Number(value.netProfitUsd)) &&
+    Number.isFinite(Number(value.netRoiPct)) &&
+    typeof value.firstSeenAt==="string" &&
+    typeof value.lastSeenAt==="string" &&
+    Number.isFinite(Number(value.sightings))
+  );
+}
+
 function persistEphemeralPaperState(){
   if(!persistencePath) return {configured:false,written:false};
   const tempPath=`${persistencePath}.${process.pid}.tmp`;
   try{
     mkdirSync(dirname(persistencePath),{recursive:true});
     const payload={
-      version:1,
+      version:2,
       writtenAt:new Date().toISOString(),
       nextId,
-      trades
+      trades,
+      structuralBaskets
     };
     writeFileSync(tempPath,JSON.stringify(payload),"utf8");
     renameSync(tempPath,persistencePath);
@@ -98,6 +135,9 @@ export function configureEphemeralPaperPersistence(filePath:string|null){
     }
     const parsed=JSON.parse(readFileSync(persistencePath,"utf8"));
     const loaded=Array.isArray(parsed?.trades) ? parsed.trades.filter(validTrade) : [];
+    const loadedBaskets=Array.isArray(parsed?.structuralBaskets)
+      ? parsed.structuralBaskets.filter(validStructuralBasket)
+      : [];
     trades=loaded.map((trade:any)=>({
       ...trade,
       id:Number(trade.id),
@@ -109,12 +149,28 @@ export function configureEphemeralPaperPersistence(filePath:string|null){
       winningOutcome:trade.winningOutcome ?? null,
       expectedResolutionAt:trade.expectedResolutionAt ?? null
     }));
-    const maxId=trades.reduce((max,trade)=>Math.max(max,Number(trade.id)||0),0);
+    structuralBaskets=loadedBaskets.map((basket:any)=>({
+      ...basket,
+      id:Number(basket.id),
+      marketCount:Number(basket.marketCount),
+      yesTokenIds:basket.yesTokenIds.map(String),
+      budgetUsd:Number(basket.budgetUsd),
+      netProfitUsd:Number(basket.netProfitUsd),
+      netRoiPct:Number(basket.netRoiPct),
+      sightings:Math.max(1,Number(basket.sightings)||1),
+      bestNetProfitUsd:Number(basket.bestNetProfitUsd ?? basket.netProfitUsd),
+      bestNetRoiPct:Number(basket.bestNetRoiPct ?? basket.netRoiPct)
+    }));
+    const maxId=Math.max(
+      trades.reduce((max,trade)=>Math.max(max,Number(trade.id)||0),0),
+      structuralBaskets.reduce((max,basket)=>Math.max(max,Number(basket.id)||0),0)
+    );
     nextId=Math.max(maxId+1,Number(parsed?.nextId)||1);
     persistenceLoadedAt=new Date().toISOString();
     return {
       configured:true,
       loadedTrades:trades.length,
+      loadedStructuralBaskets:structuralBaskets.length,
       filePath:persistencePath,
       loadedAt:persistenceLoadedAt
     };
@@ -137,13 +193,15 @@ export function getEphemeralPaperPersistenceStatus(){
     lastWriteAt:persistenceLastWriteAt,
     lastError:persistenceLastError,
     trades:trades.length,
-    openTrades:trades.filter(trade=>trade.status==="OPEN").length
+    openTrades:trades.filter(trade=>trade.status==="OPEN").length,
+    structuralBaskets:structuralBaskets.length
   };
 }
 
 export function resetEphemeralPaperLab(){
   nextId=1;
   trades=[];
+  structuralBaskets=[];
   persistEphemeralPaperState();
 }
 
@@ -167,6 +225,78 @@ export function createEphemeralPaperTrade(input:EphemeralPaperTradeInput){
   trades.push(trade);
   persistEphemeralPaperState();
   return {configured:true,inserted:true,id:trade.id};
+}
+
+export function recordStructuralBasketPaper(input:StructuralBasketPaperInput){
+  const eventId=String(input.eventId||"").trim();
+  const tokenKey=[...input.yesTokenIds].map(String).sort().join("|");
+  if(!eventId || !tokenKey) return {configured:true,inserted:false,updated:false,id:null};
+  const now=new Date().toISOString();
+  const existing=structuralBaskets.find(row=>
+    row.eventId===eventId &&
+    [...row.yesTokenIds].map(String).sort().join("|")===tokenKey
+  );
+  if(existing){
+    existing.lastSeenAt=now;
+    existing.sightings+=1;
+    if(Number(input.netProfitUsd)>existing.bestNetProfitUsd){
+      existing.bestNetProfitUsd=Number(input.netProfitUsd);
+      existing.bestNetRoiPct=Number(input.netRoiPct);
+      existing.budgetUsd=Number(input.budgetUsd);
+      existing.netProfitUsd=Number(input.netProfitUsd);
+      existing.netRoiPct=Number(input.netRoiPct);
+      existing.marketCount=Number(input.marketCount);
+      existing.eventTitle=input.eventTitle;
+    }
+    persistEphemeralPaperState();
+    return {configured:true,inserted:false,updated:true,id:existing.id};
+  }
+  const row:StructuralBasketPaperObservation={
+    ...input,
+    id:nextId++,
+    eventId,
+    eventTitle:input.eventTitle ?? null,
+    marketCount:Number(input.marketCount),
+    yesTokenIds:input.yesTokenIds.map(String),
+    budgetUsd:Number(input.budgetUsd),
+    netProfitUsd:Number(input.netProfitUsd),
+    netRoiPct:Number(input.netRoiPct),
+    firstSeenAt:now,
+    lastSeenAt:now,
+    sightings:1,
+    bestNetProfitUsd:Number(input.netProfitUsd),
+    bestNetRoiPct:Number(input.netRoiPct)
+  };
+  structuralBaskets.push(row);
+  persistEphemeralPaperState();
+  return {configured:true,inserted:true,updated:false,id:row.id};
+}
+
+export function listStructuralBasketPaper(limit=100){
+  return structuralBaskets
+    .slice()
+    .sort((a,b)=>b.bestNetProfitUsd-a.bestNetProfitUsd || Date.parse(b.lastSeenAt)-Date.parse(a.lastSeenAt))
+    .slice(0,Math.max(1,Math.min(1000,Number(limit||100))));
+}
+
+export function getStructuralBasketPaperStats(){
+  const simulatedCapitalUsd=structuralBaskets.reduce((sum,row)=>sum+Number(row.budgetUsd||0),0);
+  const simulatedNetProfitUsd=structuralBaskets.reduce((sum,row)=>sum+Number(row.netProfitUsd||0),0);
+  return {
+    configured:true,
+    paperOnly:true,
+    uniqueBaskets:structuralBaskets.length,
+    sightings:structuralBaskets.reduce((sum,row)=>sum+Number(row.sightings||0),0),
+    simulatedCapitalUsd:Math.round(simulatedCapitalUsd*1e6)/1e6,
+    simulatedNetProfitUsd:Math.round(simulatedNetProfitUsd*1e6)/1e6,
+    simulatedRoiPct:simulatedCapitalUsd>0
+      ? Math.round((simulatedNetProfitUsd/simulatedCapitalUsd)*100000)/1000
+      : null,
+    bestNetRoiPct:structuralBaskets.length
+      ? Math.max(...structuralBaskets.map(row=>Number(row.bestNetRoiPct||0)))
+      : null,
+    note:"Depth-and-buffer-verified structural basket observations. Paper-only; not live fills or guaranteed realized profit."
+  };
 }
 
 export function getEphemeralOpenTrades(limit=500){
