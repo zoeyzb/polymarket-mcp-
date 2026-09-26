@@ -773,6 +773,34 @@ export async function getAlertStats() {
   return { configured: true, ...rows[0] };
 }
 
+export async function getStaleHistoricalCalibrationRefs(
+  limit = 500,
+  calibrationVersion = "v2-causal-price"
+) {
+  if (!pool) return [];
+  const bounded = Math.max(1, Math.min(5000, limit));
+  const { rows } = await pool.query(
+    `select
+       condition_id as "conditionId",
+       slug,
+       domain,
+       resolved_at as "resolvedAt",
+       updated_at as "updatedAt"
+     from polymarket_brain.historical_calibration
+     where coalesce(source_payload->>'calibrationVersion','') <> $1
+       and slug is not null
+       and slug <> ''
+     order by updated_at asc, resolved_at desc
+     limit $2`,
+    [calibrationVersion, bounded]
+  );
+  return rows.map(row => ({
+    ...row,
+    resolvedAt: row.resolvedAt ? new Date(row.resolvedAt).toISOString() : null,
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : null
+  }));
+}
+
 export async function getKnownHistoricalCalibrationIds(
   conditionIds: string[],
   calibrationVersion = "v2-causal-price"
@@ -912,6 +940,21 @@ export async function getHistoricalCalibrationSummary() {
       count(*) filter (
         where source_payload->>'calibrationVersion' = 'v2-causal-price'
       )::int as "causalV2Samples",
+      count(*) filter (
+        where domain='sports' and source_payload->>'calibrationVersion' = 'v2-causal-price'
+      )::int as "causalV2SportsSamples",
+      count(*) filter (
+        where domain='crypto' and source_payload->>'calibrationVersion' = 'v2-causal-price'
+      )::int as "causalV2CryptoSamples",
+      count(*) filter (
+        where domain='weather' and source_payload->>'calibrationVersion' = 'v2-causal-price'
+      )::int as "causalV2WeatherSamples",
+      count(*) filter (
+        where domain='other' and source_payload->>'calibrationVersion' = 'v2-causal-price'
+      )::int as "causalV2OtherSamples",
+      max(updated_at) filter (
+        where source_payload->>'calibrationVersion' = 'v2-causal-price'
+      ) as "lastCausalV2UpdatedAt",
       min(resolved_at) as "firstResolvedAt",
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.historical_calibration
@@ -937,9 +980,13 @@ export async function getHistoricalCalibrationSummary() {
     order by domain, horizon
   `);
 
+  const total = Number(totals.rows[0]?.sampleCount || 0);
+  const causal = Number(totals.rows[0]?.causalV2Samples || 0);
   return {
     configured: true,
     ...totals.rows[0],
+    causalV2Remaining: Math.max(0, total - causal),
+    causalV2ProgressPct: total > 0 ? Number(((causal / total) * 100).toFixed(2)) : 0,
     horizons: horizons.rows
   };
 }
