@@ -3274,11 +3274,17 @@ async function runEphemeralResearchPaperWorker() {
       openExposureUsd:Number(stats.openExposureUsd||0)
     });
     const openSlots=Math.max(0,CHAMPION_PAPER_MAX_OPEN_TRADES-Number(stats.openTrades||0));
+    const championOpenKeys=new Set(
+      (getEphemeralOpenTrades(500) as any[])
+        .filter(trade=>String(trade.strategyId||"").startsWith("champion_100_"))
+        .map(trade=>`${trade.conditionId}:${trade.tokenId}`)
+    );
     const picks=chooseChampionPortfolio(championChoices,{
       maxPicks:openSlots || 1,
-      maxPerFamily:2,
+      maxPerFamily:1,
       minEmpiricalSamples:20,
-      minEmpiricalWinRatePct:95
+      minEmpiricalWinRatePct:95,
+      excludedIds:championOpenKeys
     });
     let availableCash=portfolio.availableCashUsd;
 
