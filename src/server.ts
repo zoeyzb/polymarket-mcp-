@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { parseJsonBody, RequestBodyError } from "./http-body.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -2139,10 +2140,8 @@ export function createMcpServer() {
 }
 
 async function parseBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  if (!chunks.length) return undefined;
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const maxBytes=Math.max(1024,Number(process.env.REQUEST_BODY_MAX_BYTES || 1024*1024));
+  return parseJsonBody(req,maxBytes);
 }
 
 function normalizeAccept(req: IncomingMessage) {
@@ -2679,6 +2678,19 @@ const httpServer = createServer(async (req, res) => {
 
     json(res, 404, { error: "not_found" });
   } catch (error) {
+    if (error instanceof RequestBodyError) {
+      console.warn(JSON.stringify({
+        level:"warn",
+        message:"request_body_rejected",
+        path:url.pathname,
+        code:error.code,
+        detail:error.message,
+        at:new Date().toISOString()
+      }));
+      if (!res.headersSent) json(res,error.status,{error:error.code,message:error.message});
+      else res.end();
+      return;
+    }
     console.error(JSON.stringify({
       level: "error",
       path: url.pathname,
