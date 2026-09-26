@@ -2,6 +2,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { parseJsonBody, RequestBodyError } from "./http-body.js";
 import { createDbBackoff } from "./db-backoff.js";
+import { collectRealtimeTargetTokens } from "./realtime-targets.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -132,6 +133,9 @@ const ROLE_STREAMS = SERVICE_ROLE === "all" || SERVICE_ROLE === "streams";
 const ROLE_HISTORY = SERVICE_ROLE === "all" || SERVICE_ROLE === "history";
 const ROLE_MAINTENANCE = SERVICE_ROLE === "all" || SERVICE_ROLE === "maintenance";
 
+const DB_BACKOFF_SKIP_LOG_MS=Math.max(10_000,Number(process.env.DB_BACKOFF_SKIP_LOG_MS || 30_000));
+const DB_BACKOFF_LAST_SKIP_LOG=new Map<string,number>();
+
 const DB_QUOTA_BACKOFF = createDbBackoff({
   baseMs:Math.max(5_000,Number(process.env.DB_QUOTA_BACKOFF_BASE_MS || 60_000)),
   maxMs:Math.max(60_000,Number(process.env.DB_QUOTA_BACKOFF_MAX_MS || 15*60_000))
@@ -139,16 +143,21 @@ const DB_QUOTA_BACKOFF = createDbBackoff({
 
 function dbQuotaSkip(worker:string){
   if(DB_QUOTA_BACKOFF.shouldAttempt()) return false;
-  const status=DB_QUOTA_BACKOFF.status();
-  console.warn(JSON.stringify({
-    level:"warn",
-    message:"db_quota_backoff_skip",
-    worker,
-    remainingMs:status.remainingMs,
-    retryAt:status.retryAt,
-    failures:status.failures,
-    at:new Date().toISOString()
-  }));
+  const now=Date.now();
+  const last=DB_BACKOFF_LAST_SKIP_LOG.get(worker) || 0;
+  if(now-last>=DB_BACKOFF_SKIP_LOG_MS){
+    DB_BACKOFF_LAST_SKIP_LOG.set(worker,now);
+    const status=DB_QUOTA_BACKOFF.status(now);
+    console.warn(JSON.stringify({
+      level:"warn",
+      message:"db_quota_backoff_skip",
+      worker,
+      remainingMs:status.remainingMs,
+      retryAt:status.retryAt,
+      failures:status.failures,
+      at:new Date().toISOString()
+    }));
+  }
   return true;
 }
 
@@ -2971,34 +2980,20 @@ async function runBackgroundScan() {
 
     // Realtime subscriptions focus on <=6h markets plus any structural edge anywhere.
     // The 24h/full-universe lanes are still rescanned from fresh CLOB books each cycle.
-    const tokens = new Set<string>();
-    const addCandidateTokens = (candidates: ScanCandidate[], maxTokens: number) => {
-      for (const candidate of candidates) {
-        for (const tokenId of candidate.tokenIds) {
-          if (tokens.size >= maxTokens) return;
-          tokens.add(tokenId);
-        }
-      }
-    };
-    const urgentBudget = Math.max(50, Math.floor(REALTIME_TARGET_TOKEN_LIMIT * 0.75));
-    addCandidateTokens(multi.lanes.urgent2h.candidates, urgentBudget);
-    addCandidateTokens(multi.structuralUniverse.binary, REALTIME_TARGET_TOKEN_LIMIT);
-    for (const basket of multi.structuralUniverse.eventBaskets) {
-      for (const tokenId of basket.yesTokenIds) {
-        if (tokens.size >= REALTIME_TARGET_TOKEN_LIMIT) break;
-        tokens.add(tokenId);
-      }
-      if (tokens.size >= REALTIME_TARGET_TOKEN_LIMIT) break;
-    }
-    addCandidateTokens(multi.lanes.developing6h.candidates, REALTIME_TARGET_TOKEN_LIMIT);
+    const tokens=collectRealtimeTargetTokens({
+      urgent:multi.lanes.urgent2h.candidates,
+      structuralBinary:multi.structuralUniverse.binary,
+      structuralBaskets:multi.structuralUniverse.eventBaskets,
+      developing:multi.lanes.developing6h.candidates
+    },REALTIME_TARGET_TOKEN_LIMIT);
     await replaceRealtimeTargets(
-      [...tokens],
+      tokens,
       "multi_horizon_scanner",
       Math.max(180, BACKGROUND_SCAN_SECONDS * 3)
     );
 
     if (ROLE_STREAMS) {
-      realtimeTracker.updateTokens([...tokens]);
+      realtimeTracker.updateTokens(tokens);
     }
 
     console.log(JSON.stringify({
@@ -3063,16 +3058,70 @@ async function runStructuralScan() {
 }
 
 let realtimeTargetRefreshRunning = false;
+let realtimeFallbackRefreshRunning=false;
+let lastRealtimeFallbackRefreshAt=0;
+const REALTIME_FALLBACK_REFRESH_MS=Math.max(60_000,Number(process.env.REALTIME_FALLBACK_REFRESH_MS || 120_000));
+
+async function runRealtimeFallbackTargetRefresh(reason:string){
+  if(realtimeFallbackRefreshRunning) return;
+  if(Date.now()-lastRealtimeFallbackRefreshAt<REALTIME_FALLBACK_REFRESH_MS) return;
+  realtimeFallbackRefreshRunning=true;
+  try{
+    const multi=await scanMultiHorizon({
+      minLiquidity:0,
+      limitPerLane:Math.min(200,REALTIME_TARGET_TOKEN_LIMIT),
+      structuralLimit:50,
+      bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+      sourceMode:"near_term",
+      nearTermMinutes:360
+    });
+    const tokens=collectRealtimeTargetTokens({
+      urgent:multi.lanes.urgent2h.candidates,
+      structuralBinary:multi.structuralUniverse.binary,
+      structuralBaskets:multi.structuralUniverse.eventBaskets,
+      developing:multi.lanes.developing6h.candidates
+    },REALTIME_TARGET_TOKEN_LIMIT);
+    realtimeTracker.updateTokens(tokens);
+    lastRealtimeFallbackRefreshAt=Date.now();
+    console.log(JSON.stringify({
+      level:"info",
+      message:"realtime_target_fallback_refresh",
+      reason,
+      tokens:tokens.length,
+      urgent2h:multi.lanes.urgent2h.totalInWindow,
+      developing6h:multi.lanes.developing6h.totalInWindow,
+      scanDurationMs:multi.scanDurationMs,
+      at:new Date().toISOString()
+    }));
+  }catch(error){
+    console.error(JSON.stringify({
+      level:"error",
+      message:"realtime_target_fallback_failed",
+      reason,
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+  }finally{
+    realtimeFallbackRefreshRunning=false;
+  }
+}
 
 async function runRealtimeTargetRefresh() {
-  if (realtimeTargetRefreshRunning || dbQuotaSkip("realtime_target_refresh")) return;
+  if (realtimeTargetRefreshRunning) return;
   realtimeTargetRefreshRunning = true;
   try {
+    if(dbQuotaSkip("realtime_target_refresh")){
+      await runRealtimeFallbackTargetRefresh("db_quota_backoff");
+      return;
+    }
     const targets = await getRealtimeTargets();
     realtimeTracker.updateTokens(targets);
     DB_QUOTA_BACKOFF.noteSuccess();
   } catch (error) {
-    if (noteDbWorkerFailure("realtime_target_refresh",error)) return;
+    if (noteDbWorkerFailure("realtime_target_refresh",error)) {
+      await runRealtimeFallbackTargetRefresh("db_quota_error");
+      return;
+    }
     console.error(JSON.stringify({
       level: "error",
       message: "realtime_target_refresh_failed",
