@@ -106,7 +106,7 @@ import { computePaperPortfolioState } from "./paper-portfolio.js";
 import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 import { buildResearchCandidateUniverse } from "./research-universe.js";
-import { chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
+import { chooseChampionCandidate, chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
 import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
 const PORT = Number(process.env.PORT || 3000);
