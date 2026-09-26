@@ -845,9 +845,16 @@ export async function getStaleHistoricalCalibrationRefs(
   const { rows } = await pool.query(
     `select
        condition_id as "conditionId",
+       market_id as "marketId",
        slug,
+       question,
        domain,
        resolved_at as "resolvedAt",
+       outcome0,
+       outcome1,
+       actual_outcome0::int as "actualOutcome0",
+       winning_outcome as "winningOutcome",
+       token0_id as "token0Id",
        updated_at as "updatedAt"
      from polymarket_brain.historical_calibration
      where coalesce(source_payload->>'calibrationVersion','') <> $1

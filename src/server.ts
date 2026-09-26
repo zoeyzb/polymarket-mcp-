@@ -85,7 +85,7 @@ import { getExternalCryptoEvidence } from "./external-evidence.js";
 import { auditScanResult, summarizeAudit, type AuditFinding } from "./audit.js";
 import { sportsTracker } from "./sports.js";
 import { buildSportsBoard } from "./sports-board.js";
-import { buildHistoricalCalibrationSample, classifyHistoricalDomain, HISTORICAL_CALIBRATION_VERSION } from "./historical-calibration.js";
+import { buildHistoricalCalibrationSample, rebuildHistoricalCalibrationSampleFromStored, classifyHistoricalDomain, HISTORICAL_CALIBRATION_VERSION, type StoredHistoricalCalibrationRef } from "./historical-calibration.js";
 import { priceCashOrNothingDigital } from "./digital-fair-value.js";
 import { fetchTopWalletProfiles } from "./wallet-intelligence.js";
 import { getWalletPortfolio, previewTrade } from "./wallet-trading.js";
@@ -2912,11 +2912,37 @@ async function runHistoricalBackfillWorker() {
         if (!stale.length) break;
         directChecked += stale.length;
 
-        for (let i = 0; i < stale.length && Date.now() - runStarted < budgetMs; i += 6) {
-          const batch = stale.slice(i, i + 6);
+        const recalibrationConcurrency = Math.max(
+          4,
+          Math.min(24, Number(process.env.HISTORICAL_RECALIBRATION_CONCURRENCY || 12))
+        );
+        for (let i = 0; i < stale.length && Date.now() - runStarted < budgetMs; i += recalibrationConcurrency) {
+          const batch = stale.slice(i, i + recalibrationConcurrency);
           const results = await Promise.all(batch.map(async ref => {
             try {
-              const market = await getMarketBySlug(String(ref.slug || ""));
+              const storedRef = {
+                conditionId:String((ref as any).conditionId || ""),
+                marketId:(ref as any).marketId ? String((ref as any).marketId) : null,
+                slug:(ref as any).slug ? String((ref as any).slug) : null,
+                question:String((ref as any).question || ""),
+                domain:String((ref as any).domain || "other"),
+                resolvedAt:String((ref as any).resolvedAt || ""),
+                outcome0:String((ref as any).outcome0 || ""),
+                outcome1:String((ref as any).outcome1 || ""),
+                actualOutcome0:Number((ref as any).actualOutcome0) as 0 | 1,
+                winningOutcome:String((ref as any).winningOutcome || ""),
+                token0Id:String((ref as any).token0Id || "")
+              } as StoredHistoricalCalibrationRef;
+
+              if (storedRef.token0Id && storedRef.resolvedAt && storedRef.question) {
+                const directSample = await rebuildHistoricalCalibrationSampleFromStored(storedRef);
+                return directSample
+                  ? { ref, sample:directSample, reason:null }
+                  : { ref, sample:null, reason:"causal_price_history_unavailable" };
+              }
+
+              // Legacy rows missing stored token metadata fall back to Gamma.
+              const market = await getMarketBySlug(String((ref as any).slug || ""));
               if (!market) {
                 return { ref, sample:null, reason:"market_lookup_unavailable" };
               }
