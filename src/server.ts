@@ -170,6 +170,58 @@ async function getProductionStrategyPolicy(force = false) {
     usableCoveragePct >= minUsableCoveragePct;
 
   const domains = ["sports","crypto","weather","other"] as const;
+
+  if (!calibrationComplete) {
+    const causalByDomain: Record<string, number> = {
+      sports:Number(calibrationSummary?.causalV2SportsSamples || 0),
+      crypto:Number(calibrationSummary?.causalV2CryptoSamples || 0),
+      weather:Number(calibrationSummary?.causalV2WeatherSamples || 0),
+      other:Number(calibrationSummary?.causalV2OtherSamples || 0)
+    };
+    const perDomain = Object.fromEntries(domains.map(domain => [domain,{
+      enabled:false,
+      sampleCount:causalByDomain[domain] || 0,
+      reason:"causal_v2_rebuild_incomplete",
+      calendarWalkForward:null,
+      sampleWalkForward:null,
+      calibratedResearch:null
+    }]));
+
+    const policy = {
+      generatedAt:new Date().toISOString(),
+      sampleCount:Object.values(causalByDomain).reduce((sum,value)=>sum+value,0),
+      calibration:{
+        version:HISTORICAL_CALIBRATION_VERSION,
+        complete:false,
+        progressPct:Number(calibrationSummary?.causalV2ProgressPct || 0),
+        remaining:Number(calibrationSummary?.causalV2Remaining || 0),
+        totalRows:Number(calibrationSummary?.sampleCount || 0),
+        causalRows:Number(calibrationSummary?.causalV2Samples || 0),
+        excludedRows:Number(calibrationSummary?.causalV2Excluded || 0),
+        usableCoveragePct,
+        minUsableCoveragePct,
+        rebuildProgressPct:Number(calibrationSummary?.causalRebuildProgressPct || 0)
+      },
+      structuralStrategiesEnabled:true,
+      directionalProbabilityModelEnabled:false,
+      directionalProbabilityModelScope:"domain_specific",
+      enabledDomains:[],
+      blockedDomains:[...domains],
+      perDomain,
+      political:{
+        directionalProbabilityModelEnabled:false,
+        reason:"political_directional_execution_disabled"
+      },
+      enforcement:{
+        liveStructuralExecution:"allowed_when_depth_and_buffer_checks_pass",
+        directionalProbabilityExecution:"blocked",
+        gptMayOverrideGate:false
+      }
+    };
+    strategyPolicyCache={at:Date.now(),value:policy};
+    return policy;
+  }
+
   const replays = await Promise.all(domains.map(async domain => {
     const replay = await runHistoricalReplay({
       years:3,
