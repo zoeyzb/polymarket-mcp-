@@ -154,6 +154,24 @@ function detectStat(text: string) {
   return stats.find(stat => text.toLowerCase().includes(stat)) ?? null;
 }
 
+function detectTeamTotalSubject(question:string,eventTitle:string|null) {
+  const match=question.match(/:\s*([^:]+?)\s+(?:o\/u|over\/under)\s*[+-]?\d+(?:\.\d+)?\b/i);
+  if(!match) return null;
+  const subject=match[1].trim();
+  if(!subject) return null;
+  const participants=String(eventTitle||"")
+    .split(/\s+(?:vs\.?|versus|v\.)\s+/i)
+    .map(x=>x.trim())
+    .filter(Boolean);
+  if(participants.length<2) return null;
+  const normalized=(value:string)=>value.toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  const needle=normalized(subject);
+  return participants.some(team=>{
+    const candidate=normalized(team);
+    return candidate===needle || candidate.endsWith(" "+needle) || needle.endsWith(" "+candidate);
+  }) ? subject : null;
+}
+
 function detectSubject(market: GammaMarket, text: string) {
   const group = s((market as any).groupItemTitle);
   if (group && !/^spread|^total|^over\/under/i.test(group)) return group;
@@ -198,6 +216,7 @@ export function classifySportsMarketStructure(
   const range = extractRange(numericText);
   const line = extractLine(market, numericText);
   const stat = detectStat(text);
+  const teamTotalSubject=detectTeamTotalSubject(question,eventTitle);
 
   let kind: SportsMarketKind = "other_sports";
 
@@ -209,7 +228,7 @@ export function classifySportsMarketStructure(
     kind = "first_scorer";
   } else if (/player prop|player.*(?:points|goals|rebounds|assists|yards|kills|shots|saves)|(?:points|goals|rebounds|assists|yards|kills|shots|saves).*player/i.test(text)) {
     kind = "player_prop";
-  } else if (/team total/i.test(text)) {
+  } else if (/team total/i.test(text) || teamTotalSubject) {
     kind = "team_total";
   } else if (
     rawType === "spreads" ||
@@ -288,7 +307,7 @@ export function classifySportsMarketStructure(
     sport: detectSport(text),
     rawSportsMarketType: rawType || null,
     eventTitle,
-    subject: detectSubject(market, question),
+    subject: teamTotalSubject || detectSubject(market, question),
     stat,
     line,
     thresholdComparator: comparator,
