@@ -3280,7 +3280,7 @@ async function runEphemeralResearchPaperWorker() {
     const availableChampionChoices=championChoices.filter(choice=>!championOpenKeys.has(choice.id));
     const picks=chooseChampionPortfolio(availableChampionChoices,{
       maxPicks:openSlots || 1,
-      maxPerFamily:2,
+      maxPerFamily:1,
       minEmpiricalSamples:20,
       minEmpiricalWinRatePct:95
     });
