@@ -202,12 +202,29 @@ export interface MultiHorizonLane {
   candidates: ScanCandidate[];
 }
 
+export interface StructuralScanDiagnostics {
+  negRiskMarketsSeen: number;
+  eventGroupsBuilt: number;
+  rejectedGroupShape: number;
+  rejectedDisplayedPrefilter: number;
+  rejectedWindow: number;
+  rejectedAuthoritativeEvent: number;
+  rejectedAuthoritativeMetadata: number;
+  rejectedComposition: number;
+  rejectedBooks: number;
+  rejectedEconomics: number;
+  eventBasketsReturned: number;
+  binaryExecutable: number;
+  binaryTopBookOnly: number;
+}
+
 export interface StructuralUniverseResult {
   binary: ScanCandidate[];
   eventBaskets: EventBasketOpportunity[];
   categoryCounts: Record<string, number>;
   executableCount: number;
   topBookOnlyCount: number;
+  diagnostics?: StructuralScanDiagnostics;
 }
 
 export interface MultiHorizonScanResult {
