@@ -113,7 +113,7 @@ import { buildResearchCandidateUniverse } from "./research-universe.js";
 import { chooseChampionCandidate, chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
 import { chooseGrowthCandidate, growthStakeUsd } from "./paper-growth-challenge.js";
 import { selectObservationCandidates } from "./paper-observation.js";
-import { configureEphemeralPaperPersistence, createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperPersistenceStatus, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
+import { configureEphemeralPaperPersistence, createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperPersistenceStatus, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade, recordStructuralBasketPaper, listStructuralBasketPaper, getStructuralBasketPaperStats } from "./ephemeral-paper-lab.js";
 
 const PAPER_LAB_STATE_PATH = String(process.env.PAPER_LAB_STATE_PATH || "").trim();
 const PAPER_LAB_PERSISTENCE_BOOT = configureEphemeralPaperPersistence(PAPER_LAB_STATE_PATH || null);
@@ -300,6 +300,10 @@ async function getPaperTradingApiSnapshot(limit:number) {
         note:"paper challenge targets, not forecasts or guarantees"
       },
       observationStats,
+      structuralBasketPaper:{
+        stats:getStructuralBasketPaperStats(),
+        observations:listStructuralBasketPaper(Math.min(100,bounded))
+      },
       ephemeralPersistence:getEphemeralPaperPersistenceStatus(),
       combinedStats,
       productionFamilyStats,
@@ -3267,6 +3271,26 @@ async function runEphemeralResearchPaperWorker() {
     return;
   }
 
+  let structuralBasketInserted=0;
+  let structuralBasketUpdated=0;
+  for(const basket of latest.structuralUniverse?.eventBaskets || []){
+    const execution=[...(basket.executable || [])]
+      .filter((row:any)=>row?.fillComplete===true && Number(row?.netProfitUsd)>0 && Number(row?.budgetUsd)>0)
+      .sort((a:any,b:any)=>Number(b.netProfitUsd||0)-Number(a.netProfitUsd||0))[0];
+    if(!execution) continue;
+    const recorded=recordStructuralBasketPaper({
+      eventId:String(basket.eventId||""),
+      eventTitle:basket.eventTitle ?? null,
+      marketCount:Number(basket.marketCount||0),
+      yesTokenIds:(basket.yesTokenIds || []).map(String),
+      budgetUsd:Number(execution.budgetUsd),
+      netProfitUsd:Number(execution.netProfitUsd),
+      netRoiPct:Number(execution.netRoiPct||0)
+    });
+    if(recorded.inserted) structuralBasketInserted++;
+    else if(recorded.updated) structuralBasketUpdated++;
+  }
+
   const researchCandidates=buildResearchCandidateUniverse(latest)
     .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
     .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
@@ -3595,6 +3619,12 @@ async function runEphemeralResearchPaperWorker() {
     considered,
     inserted,
     daily:getEphemeralDailyStats("research_shadow_"),
+    structuralBaskets:{
+      inserted:structuralBasketInserted,
+      updated:structuralBasketUpdated,
+      stats:getStructuralBasketPaperStats(),
+      top:listStructuralBasketPaper(5)
+    },
     cohorts:Object.fromEntries([...confidenceStates.entries()].map(([band,state])=>[band,state])),
     rejected,
     at:new Date().toISOString()
@@ -3631,6 +3661,7 @@ async function settleEphemeralPaperTrades() {
       observationDaily:getEphemeralDailyStats("observation_sports_"),
       research:getEphemeralPaperStats("research_shadow_"),
       researchDaily:getEphemeralDailyStats("research_shadow_"),
+      structuralBasketPaper:getStructuralBasketPaperStats(),
       at:new Date().toISOString()
     }));
   }
