@@ -107,6 +107,7 @@ import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./r
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 import { buildResearchCandidateUniverse } from "./research-universe.js";
 import { chooseChampionCandidate, championStakeUsd } from "./paper-champion.js";
+import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -2777,6 +2778,7 @@ const CHAMPION_PAPER_MAX_OPEN_TRADES = Math.max(1, Math.min(10, Number(process.e
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
+let lastLiveMultiHorizonSnapshot:any = null;
 
 async function runBackgroundScan() {
   if (backgroundScanRunning) return;
@@ -2794,6 +2796,7 @@ async function runBackgroundScan() {
     if (lastStructuralUniverse) {
       multi.structuralUniverse = lastStructuralUniverse;
     }
+    lastLiveMultiHorizonSnapshot = multi;
 
     // Persist the broad <=24h lane so historical evidence accumulates before markets
     // become urgent. Full-universe structural opportunities remain available in
@@ -3107,6 +3110,214 @@ function paperFeeRate(domain:string) {
   return 0;
 }
 
+async function runEphemeralResearchPaperWorker() {
+  if (!RESEARCH_SHADOW_ENABLED) return;
+  const latest=lastLiveMultiHorizonSnapshot;
+  if (!latest) {
+    console.log(JSON.stringify({
+      level:"info",
+      message:"ephemeral_research_shadow_skipped",
+      reason:"no_live_scanner_snapshot_yet",
+      at:new Date().toISOString()
+    }));
+    return;
+  }
+
+  const researchCandidates=buildResearchCandidateUniverse(latest)
+    .filter(candidate=>candidate.conditionId && candidate.slug && candidate.tokenIds?.length && candidate.outcomes?.length)
+    .filter(candidate=>strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug)!=="political")
+    .sort((a,b)=>{
+      const ad=strategyDomainForMarket(a.primaryCategory,a.question,a.slug);
+      const bd=strategyDomainForMarket(b.primaryCategory,b.question,b.slug);
+      const sportsDelta=Number(bd==="sports")-Number(ad==="sports");
+      if (sportsDelta) return sportsDelta;
+      const ap=Math.max(...(a.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+      const bp=Math.max(...(b.displayedOutcomePrices || []).map(Number).filter(Number.isFinite),0);
+      return bp-ap || Number(b.liquidityUsd||0)-Number(a.liquidityUsd||0);
+    });
+
+  const confidenceRows=getEphemeralConfidenceStats("research_shadow_") as any[];
+  const confidenceStates=new Map<ResearchConfidenceBand,{openTrades:number;openExposureUsd:number;availableCashUsd:number;realizedNetPnlUsd:number}>();
+  for (const band of ["ultra_high","high","exploratory"] as ResearchConfidenceBand[]) {
+    const row=confidenceRows.find(item=>String(item.confidenceBand)===band) || {};
+    const state=computePaperPortfolioState({
+      startingBankrollUsd:RESEARCH_SHADOW_BANKROLL_USD,
+      realizedNetPnlUsd:Number(row.netPnlUsd||0),
+      openExposureUsd:Number(row.openExposureUsd||0)
+    });
+    confidenceStates.set(band,{
+      openTrades:Number(row.openTrades||0),
+      openExposureUsd:state.openExposureUsd,
+      availableCashUsd:state.availableCashUsd,
+      realizedNetPnlUsd:Number(row.netPnlUsd||0)
+    });
+  }
+
+  const rejected:Record<string,number>={};
+  const championChoices:any[]=[];
+  let inserted=0;
+  let considered=0;
+
+  for (const candidate of researchCandidates) {
+    if (Number(candidate.liquidityUsd||0) < RESEARCH_SHADOW_MIN_LIQUIDITY_USD) {
+      rejected.low_liquidity=(rejected.low_liquidity||0)+1;
+      continue;
+    }
+    const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
+    const family=marketFamilyFromCandidate(candidate,domain);
+    const prices=(candidate.displayedOutcomePrices||[]).map(Number);
+    let outcomeIndex=-1;
+    let displayedPrice=-Infinity;
+    for(let i=0;i<prices.length;i++){
+      if(Number.isFinite(prices[i]) && prices[i]>displayedPrice){
+        displayedPrice=prices[i];
+        outcomeIndex=i;
+      }
+    }
+    if(outcomeIndex<0) { rejected.invalid_price=(rejected.invalid_price||0)+1; continue; }
+    const tokenId=candidate.tokenIds[outcomeIndex];
+    const book=candidate.books?.find(book=>book.tokenId===tokenId) || candidate.books?.[outcomeIndex];
+    const entryPrice=Number(book?.bestAsk ?? displayedPrice);
+    if (!(entryPrice>=RESEARCH_SHADOW_MIN_PRICE && entryPrice<=RESEARCH_SHADOW_MAX_PRICE)) {
+      rejected.price_band=(rejected.price_band||0)+1;
+      continue;
+    }
+    const confidenceBand=classifyResearchConfidenceBand(entryPrice);
+    if(!confidenceBand) { rejected.no_confidence_band=(rejected.no_confidence_band||0)+1; continue; }
+
+    if(confidenceBand==="ultra_high" || confidenceBand==="high"){
+      championChoices.push({
+        id:`${candidate.conditionId}:${tokenId}`,
+        domain,family,entryPrice,
+        liquidityUsd:Number(candidate.liquidityUsd||0),
+        minutesRemaining:Number(candidate.minutesRemaining||0),
+        candidate,outcomeIndex,tokenId
+      });
+    }
+
+    const state=confidenceStates.get(confidenceBand)!;
+    if(state.openTrades>=RESEARCH_SHADOW_MAX_OPEN_TRADES) continue;
+    const stake=Math.min(RESEARCH_SHADOW_STAKE_USD,state.availableCashUsd,RESEARCH_SHADOW_BANKROLL_USD*0.1);
+    if(!(stake>0)) continue;
+    considered++;
+    const result=createEphemeralPaperTrade({
+      strategyId:`research_shadow_${confidenceBand}_${domain}_${family}`,
+      conditionId:String(candidate.conditionId),
+      tokenId:String(tokenId),
+      slug:String(candidate.slug),
+      question:String(candidate.question||""),
+      domain,
+      family,
+      outcome:String(candidate.outcomes[outcomeIndex]||""),
+      entryPrice,
+      stakeUsd:stake,
+      expectedResolutionAt:candidate.endDate || null
+    });
+    if(result.inserted){
+      inserted++;
+      state.openTrades++;
+      state.openExposureUsd+=stake;
+      state.availableCashUsd=Math.max(0,state.availableCashUsd-stake);
+    }
+  }
+
+  let championDecision:any=null;
+  if(CHAMPION_PAPER_ENABLED){
+    const stats=getEphemeralPaperStats("champion_100_") as any;
+    const portfolio=computePaperPortfolioState({
+      startingBankrollUsd:CHAMPION_PAPER_BANKROLL_USD,
+      realizedNetPnlUsd:Number(stats.netPnlUsd||0),
+      openExposureUsd:Number(stats.openExposureUsd||0)
+    });
+    const pick=chooseChampionCandidate(championChoices);
+    if(pick && Number(stats.openTrades||0)<CHAMPION_PAPER_MAX_OPEN_TRADES){
+      const choice=championChoices.find(item=>item.id===pick.id);
+      const stake=championStakeUsd({
+        currentBankrollUsd:portfolio.currentBankrollUsd,
+        availableCashUsd:portfolio.availableCashUsd,
+        maxStakeUsd:CHAMPION_PAPER_MAX_STAKE_USD
+      });
+      if(choice && stake>0){
+        const result=createEphemeralPaperTrade({
+          strategyId:`champion_100_${choice.domain}_${choice.family}`,
+          conditionId:String(choice.candidate.conditionId),
+          tokenId:String(choice.tokenId),
+          slug:String(choice.candidate.slug),
+          question:String(choice.candidate.question||""),
+          domain:choice.domain,
+          family:choice.family,
+          outcome:String(choice.candidate.outcomes[choice.outcomeIndex]||""),
+          entryPrice:choice.entryPrice,
+          stakeUsd:stake,
+          expectedResolutionAt:choice.candidate.endDate || null
+        });
+        championDecision={
+          inserted:result.inserted,
+          conditionId:choice.candidate.conditionId,
+          question:choice.candidate.question,
+          outcome:choice.candidate.outcomes[choice.outcomeIndex],
+          domain:choice.domain,
+          family:choice.family,
+          entryPrice:choice.entryPrice,
+          stakeUsd:stake
+        };
+      }
+    }
+    console.log(JSON.stringify({
+      level:"info",
+      message:"ephemeral_champion_100_entry",
+      storage:"memory_only",
+      decision:championDecision,
+      portfolioBefore:portfolio,
+      candidateCount:championChoices.length,
+      at:new Date().toISOString()
+    }));
+  }
+
+  console.log(JSON.stringify({
+    level:"info",
+    message:"ephemeral_research_shadow_entries",
+    storage:"memory_only",
+    candidateUniverse:researchCandidates.length,
+    sportsCandidates:researchCandidates.filter(c=>strategyDomainForMarket(c.primaryCategory,c.question,c.slug)==="sports").length,
+    multiOutcomeCandidates:researchCandidates.filter(c=>c.outcomes.length>2).length,
+    considered,
+    inserted,
+    cohorts:Object.fromEntries([...confidenceStates.entries()].map(([band,state])=>[band,state])),
+    rejected,
+    at:new Date().toISOString()
+  }));
+}
+
+async function settleEphemeralPaperTrades() {
+  const open=getEphemeralOpenTrades(500) as any[];
+  let resolved=0;
+  for(const trade of open){
+    const expectedTs=trade.expectedResolutionAt ? Date.parse(trade.expectedResolutionAt) : NaN;
+    if(Number.isFinite(expectedTs) && Date.now()<expectedTs) continue;
+    const market=await getMarketBySlug(String(trade.slug)).catch(()=>null);
+    if(!market) continue;
+    const resolution=inferFinalResolution(market);
+    if(!resolution) continue;
+    const winning=String(resolution.winningOutcome||"");
+    const chosen=String(trade.outcome||"");
+    const won=winning.trim().toLowerCase()===chosen.trim().toLowerCase();
+    if(settleEphemeralPaperTrade({id:Number(trade.id),won,winningOutcome:winning||null}).updated) resolved++;
+  }
+  if(open.length||resolved){
+    console.log(JSON.stringify({
+      level:"info",
+      message:"ephemeral_paper_settlement",
+      storage:"memory_only",
+      openChecked:open.length,
+      resolved,
+      champion:getEphemeralPaperStats("champion_100_"),
+      research:getEphemeralPaperStats("research_shadow_"),
+      at:new Date().toISOString()
+    }));
+  }
+}
+
 async function runPaperEntryWorker() {
   if (!PAPER_TRADING_ENABLED || paperEntryRunning) return;
   paperEntryRunning = true;
@@ -3118,8 +3329,10 @@ async function runPaperEntryWorker() {
         message:"paper_trade_entry_skipped",
         reason:"causal_v2_rebuild_incomplete",
         calibration:policy?.calibration || null,
+        researchFallback:"ephemeral_memory",
         at:new Date().toISOString()
       }));
+      await runEphemeralResearchPaperWorker();
       return;
     }
 
@@ -3673,6 +3886,7 @@ async function runPaperSettlementWorker() {
   if (!PAPER_TRADING_ENABLED || paperSettlementRunning) return;
   paperSettlementRunning=true;
   try {
+    await settleEphemeralPaperTrades();
     const open=await getOpenPaperTrades(500);
     let resolved=0;
     for(const trade of open as any[]) {
