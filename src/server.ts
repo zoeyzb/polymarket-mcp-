@@ -146,7 +146,7 @@ function normalizeOpportunityLane(value: string | null): OpportunityLane {
 let strategyPolicyCache: { at:number; value:any } | null = null;
 const STRATEGY_POLICY_CACHE_MS = Math.max(30_000, Number(process.env.STRATEGY_POLICY_CACHE_MS || 300_000));
 
-function strategyDomainForMarket(category: string, question = "", slug = "") {
+function strategyDomainForMarket(category: string | null | undefined, question: string | null | undefined = "", slug: string | null | undefined = "") {
   const value = String(category || "other").toLowerCase();
   const text = [question, slug].filter(Boolean).join(" ").toLowerCase();
 
@@ -2885,7 +2885,7 @@ async function runPaperEntryWorker() {
     for (const candidate of candidates) {
       if (candidate.minutesRemaining < 45 || candidate.minutesRemaining > 75) continue;
       if (!candidate.conditionId || !candidate.slug || candidate.outcomes.length !== 2) continue;
-      const domain=strategyDomainForCategory(candidate.primaryCategory);
+      const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
       if (domain === "political") continue;
 
       const researchPolicy=policy?.perDomain?.[domain]?.sampleWalkForward;
