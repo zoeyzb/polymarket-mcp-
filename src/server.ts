@@ -107,7 +107,9 @@ import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./r
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 import { buildResearchCandidateUniverse } from "./research-universe.js";
 import { chooseChampionCandidate, chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
-import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
+import { chooseGrowthCandidate, growthStakeUsd } from "./paper-growth-challenge.js";
+import { selectObservationCandidates } from "./paper-observation.js";
+import { createEphemeralPaperTrade, getEphemeralOpenTrades, listEphemeralPaperTrades, getEphemeralPaperStats, getEphemeralDailyStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -165,15 +167,17 @@ async function getPaperTradingApiSnapshot(limit:number) {
   ) return paperTradingApiCache.value;
   if (paperTradingApiPromise) return paperTradingApiPromise;
   paperTradingApiPromise=(async()=>{
-    const [stats,researchStats,championStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
-      getPaperTradingStats("calendar_walk_forward_"),
-      getPaperTradingStats("research_shadow_"),
-      getPaperTradingStats("champion_100_"),
-      getPaperTradingStats(),
-      getPaperTradingFamilyStats("calendar_walk_forward_"),
-      getPaperTradingFamilyStats("research_shadow_"),
-      getPaperTradingConfidenceStats("research_shadow_"),
-      listPaperTrades(bounded)
+    const [stats,researchStats,championStats,growthStats,observationStats,combinedStats,productionFamilyStats,researchFamilyStats,researchConfidenceStats,trades]=await Promise.all([
+      getPaperTradingStats("calendar_walk_forward_").catch(()=>({configured:false,reason:"persistence_unavailable"})),
+      getPaperTradingStats("research_shadow_").catch(()=>getEphemeralPaperStats("research_shadow_")),
+      getPaperTradingStats("champion_100_").catch(()=>getEphemeralPaperStats("champion_100_")),
+      getPaperTradingStats("growth_100_").catch(()=>getEphemeralPaperStats("growth_100_")),
+      getPaperTradingStats("observation_sports_").catch(()=>getEphemeralPaperStats("observation_sports_")),
+      getPaperTradingStats().catch(()=>getEphemeralPaperStats()),
+      getPaperTradingFamilyStats("calendar_walk_forward_").catch(()=>[]),
+      getPaperTradingFamilyStats("research_shadow_").catch(()=>getEphemeralFamilyStats("research_shadow_")),
+      getPaperTradingConfidenceStats("research_shadow_").catch(()=>getEphemeralConfidenceStats("research_shadow_")),
+      listPaperTrades(bounded).catch(()=>listEphemeralPaperTrades(bounded))
     ]);
     const researchPortfolios=Object.fromEntries(
       ["ultra_high","high","exploratory"].map(band=>{
@@ -195,6 +199,11 @@ async function getPaperTradingApiSnapshot(limit:number) {
       realizedNetPnlUsd:Number((championStats as any)?.netPnlUsd || 0),
       openExposureUsd:Number((championStats as any)?.openExposureUsd || 0)
     });
+    const growthPortfolio=computePaperPortfolioState({
+      startingBankrollUsd:GROWTH_PAPER_BANKROLL_USD,
+      realizedNetPnlUsd:Number((growthStats as any)?.netPnlUsd || 0),
+      openExposureUsd:Number((growthStats as any)?.openExposureUsd || 0)
+    });
     const value={
       enabled:PAPER_TRADING_ENABLED,
       researchShadowEnabled:RESEARCH_SHADOW_ENABLED,
@@ -206,6 +215,19 @@ async function getPaperTradingApiSnapshot(limit:number) {
       championPaperEnabled:CHAMPION_PAPER_ENABLED,
       championStats,
       championPortfolio,
+      championDaily:getEphemeralDailyStats("champion_100_"),
+      growthPaperEnabled:GROWTH_PAPER_ENABLED,
+      growthStats,
+      growthPortfolio,
+      growthDaily:getEphemeralDailyStats("growth_100_"),
+      growthDailyTargets:{
+        startBankrollUsd:100,
+        target500Usd:{targetBankrollUsd:500,requiredReturnPct:400},
+        target1000Usd:{targetBankrollUsd:1000,requiredReturnPct:900},
+        note:"paper challenge targets, not forecasts"
+      },
+      observationStats,
+      observationDaily:getEphemeralDailyStats("observation_sports_"),
       combinedStats,
       productionFamilyStats,
       researchFamilyStats,
@@ -2775,6 +2797,14 @@ const CHAMPION_PAPER_ENABLED = String(process.env.CHAMPION_PAPER_ENABLED || "tru
 const CHAMPION_PAPER_BANKROLL_USD = 100;
 const CHAMPION_PAPER_MAX_STAKE_USD = Math.max(1, Math.min(25, Number(process.env.CHAMPION_PAPER_MAX_STAKE_USD || 10)));
 const CHAMPION_PAPER_MAX_OPEN_TRADES = Math.max(1, Math.min(10, Number(process.env.CHAMPION_PAPER_MAX_OPEN_TRADES || 4)));
+const GROWTH_PAPER_ENABLED = String(process.env.GROWTH_PAPER_ENABLED || "true").toLowerCase() !== "false";
+const GROWTH_PAPER_BANKROLL_USD = 100;
+const GROWTH_PAPER_MAX_STAKE_USD = Math.max(1, Math.min(35, Number(process.env.GROWTH_PAPER_MAX_STAKE_USD || 20)));
+const GROWTH_PAPER_MAX_FRACTION = Math.max(0.05, Math.min(0.35, Number(process.env.GROWTH_PAPER_MAX_FRACTION || 0.2)));
+const GROWTH_PAPER_MAX_OPEN_TRADES = Math.max(1, Math.min(8, Number(process.env.GROWTH_PAPER_MAX_OPEN_TRADES || 4)));
+const SPORTS_OBSERVATION_ENABLED = String(process.env.SPORTS_OBSERVATION_ENABLED || "true").toLowerCase() !== "false";
+const SPORTS_OBSERVATION_MAX_OPEN = Math.max(25, Math.min(1000, Number(process.env.SPORTS_OBSERVATION_MAX_OPEN || 300)));
+const SPORTS_OBSERVATION_PER_FAMILY = Math.max(5, Math.min(200, Number(process.env.SPORTS_OBSERVATION_PER_FAMILY || 60)));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -3157,6 +3187,7 @@ async function runEphemeralResearchPaperWorker() {
 
   const rejected:Record<string,number>={};
   const championChoices:any[]=[];
+  const growthChoices:any[]=[];
   let inserted=0;
   let considered=0;
 
@@ -3200,6 +3231,13 @@ async function runEphemeralResearchPaperWorker() {
         candidate,outcomeIndex,tokenId
       });
     }
+    growthChoices.push({
+      id:`${candidate.conditionId}:${tokenId}`,
+      domain,family,entryPrice,
+      liquidityUsd:Number(candidate.liquidityUsd||0),
+      minutesRemaining:Number(candidate.minutesRemaining||0),
+      candidate,outcomeIndex,tokenId
+    });
 
     const state=confidenceStates.get(confidenceBand)!;
     if(state.openTrades>=RESEARCH_SHADOW_MAX_OPEN_TRADES) continue;
@@ -3294,6 +3332,131 @@ async function runEphemeralResearchPaperWorker() {
     }));
   }
 
+  let growthDecision:any=null;
+  if(GROWTH_PAPER_ENABLED){
+    const stats=getEphemeralPaperStats("growth_100_") as any;
+    const portfolio=computePaperPortfolioState({
+      startingBankrollUsd:GROWTH_PAPER_BANKROLL_USD,
+      realizedNetPnlUsd:Number(stats.netPnlUsd||0),
+      openExposureUsd:Number(stats.openExposureUsd||0)
+    });
+    const openKeys=new Set(
+      (getEphemeralOpenTrades(500) as any[])
+        .filter(trade=>String(trade.strategyId||"").startsWith("growth_100_"))
+        .map(trade=>`${trade.conditionId}:${trade.tokenId}`)
+    );
+    const availableChoices=growthChoices.filter(choice=>!openKeys.has(choice.id));
+    const pick=chooseGrowthCandidate(availableChoices);
+    if(pick && Number(stats.openTrades||0)<GROWTH_PAPER_MAX_OPEN_TRADES){
+      const choice=availableChoices.find(item=>item.id===pick.id);
+      const stake=growthStakeUsd({
+        currentBankrollUsd:portfolio.currentBankrollUsd,
+        availableCashUsd:portfolio.availableCashUsd,
+        maxStakeUsd:GROWTH_PAPER_MAX_STAKE_USD,
+        maxFraction:GROWTH_PAPER_MAX_FRACTION
+      });
+      if(choice && stake>0){
+        const result=createEphemeralPaperTrade({
+          strategyId:`growth_100_${choice.domain}_${choice.family}`,
+          conditionId:String(choice.candidate.conditionId),
+          tokenId:String(choice.tokenId),
+          slug:String(choice.candidate.slug),
+          question:String(choice.candidate.question||""),
+          domain:choice.domain,
+          family:choice.family,
+          outcome:String(choice.candidate.outcomes[choice.outcomeIndex]||""),
+          entryPrice:choice.entryPrice,
+          stakeUsd:stake,
+          expectedResolutionAt:choice.candidate.endDate || null
+        });
+        growthDecision={
+          inserted:result.inserted,
+          conditionId:choice.candidate.conditionId,
+          question:choice.candidate.question,
+          outcome:choice.candidate.outcomes[choice.outcomeIndex],
+          domain:choice.domain,
+          family:choice.family,
+          entryPrice:choice.entryPrice,
+          stakeUsd:stake,
+          minutesRemaining:choice.minutesRemaining
+        };
+      }
+    }
+    console.log(JSON.stringify({
+      level:"info",
+      message:"ephemeral_growth_100_entry",
+      storage:"memory_only",
+      decision:growthDecision,
+      portfolioBefore:portfolio,
+      daily:getEphemeralDailyStats("growth_100_"),
+      candidateCount:availableChoices.length,
+      dailyTargets:{
+        target500Usd:{requiredReturnPct:400},
+        target1000Usd:{requiredReturnPct:900},
+        note:"challenge targets only; not expected or guaranteed"
+      },
+      at:new Date().toISOString()
+    }));
+  }
+
+  let observationInserted=0;
+  let observationConsidered=0;
+  if(SPORTS_OBSERVATION_ENABLED){
+    const stats=getEphemeralPaperStats("observation_sports_") as any;
+    const remaining=Math.max(0,SPORTS_OBSERVATION_MAX_OPEN-Number(stats.openTrades||0));
+    const selections=remaining>0
+      ? selectObservationCandidates(researchCandidates,{
+          limit:Math.min(remaining,SPORTS_OBSERVATION_MAX_OPEN),
+          perFamilyLimit:SPORTS_OBSERVATION_PER_FAMILY,
+          minLiquidityUsd:RESEARCH_SHADOW_MIN_LIQUIDITY_USD,
+          minPrice:RESEARCH_SHADOW_MIN_PRICE,
+          maxPrice:0.99
+        })
+      : [];
+    const familyInserted:Record<string,number>={};
+    for(const row of selections){
+      observationConsidered++;
+      const candidate=row.candidate;
+      const entryPrice=Number(
+        candidate.books?.find(book=>book.tokenId===row.tokenId)?.bestAsk ??
+        candidate.books?.[row.outcomeIndex]?.bestAsk ??
+        row.displayedPrice
+      );
+      if(!(entryPrice>0 && entryPrice<1)) continue;
+      const result=createEphemeralPaperTrade({
+        strategyId:`observation_sports_${row.family}`,
+        conditionId:String(candidate.conditionId),
+        tokenId:String(row.tokenId),
+        slug:String(candidate.slug),
+        question:String(candidate.question||""),
+        domain:"sports",
+        family:row.family,
+        outcome:String(candidate.outcomes[row.outcomeIndex]||""),
+        entryPrice,
+        stakeUsd:1,
+        expectedResolutionAt:candidate.endDate || null
+      });
+      if(result.inserted){
+        observationInserted++;
+        familyInserted[row.family]=(familyInserted[row.family]||0)+1;
+      }
+    }
+    console.log(JSON.stringify({
+      level:"info",
+      message:"ephemeral_sports_observation_entries",
+      storage:"memory_only",
+      capitalModel:"one_dollar_notional_per_observation_not_a_bankroll",
+      considered:observationConsidered,
+      inserted:observationInserted,
+      maxOpen:SPORTS_OBSERVATION_MAX_OPEN,
+      perFamilyLimit:SPORTS_OBSERVATION_PER_FAMILY,
+      familyInserted,
+      stats:getEphemeralPaperStats("observation_sports_"),
+      daily:getEphemeralDailyStats("observation_sports_"),
+      at:new Date().toISOString()
+    }));
+  }
+
   console.log(JSON.stringify({
     level:"info",
     message:"ephemeral_research_shadow_entries",
@@ -3332,7 +3495,13 @@ async function settleEphemeralPaperTrades() {
       openChecked:open.length,
       resolved,
       champion:getEphemeralPaperStats("champion_100_"),
+      championDaily:getEphemeralDailyStats("champion_100_"),
+      growth:getEphemeralPaperStats("growth_100_"),
+      growthDaily:getEphemeralDailyStats("growth_100_"),
+      observation:getEphemeralPaperStats("observation_sports_"),
+      observationDaily:getEphemeralDailyStats("observation_sports_"),
       research:getEphemeralPaperStats("research_shadow_"),
+      researchDaily:getEphemeralDailyStats("research_shadow_"),
       at:new Date().toISOString()
     }));
   }
