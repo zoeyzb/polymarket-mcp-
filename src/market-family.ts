@@ -26,6 +26,16 @@ export interface MarketFamilyInput {
 const THRESHOLD_RE =
   /\b(over|under|above|below|at least|at most|more than|less than|fewer than|exceed|exceeds|higher than|lower than)\b|\b\d+(?:\.\d+)?\s*\+/i;
 
+function looksLikeHistoricalPlayerProp(question:string) {
+  const match=question.match(/^(.+?)\s+(over|under|above|below|at least|at most)\s+\d/i);
+  if (!match) return false;
+  const subject=match[1].trim();
+  if (!subject || /^(will|does|is|can|could|would|the|this|game|team)\b/i.test(subject)) return false;
+  const words=subject.split(/\s+/).filter(Boolean);
+  if (words.length<1 || words.length>4) return false;
+  return /\b(points?|goals?|runs?|rebounds?|assists?|yards?|kills?|shots?|saves?|strikeouts?|home runs?|aces?)\b/i.test(question);
+}
+
 export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
   const domain=String(input.domain||"other").toLowerCase();
   const outcomeCount=Math.max(0,Number(input.outcomeCount||0));
@@ -48,7 +58,7 @@ export function classifyMarketFamily(input: MarketFamilyInput): MarketFamily {
     if (/\bspread\b|handicap|[+-]\d+(?:\.\d+)?\b/.test(question)) return "sports_spread";
     if (/\bteam total\b/i.test(question)) return "sports_team_total";
     if (/\b(player prop|rebounds?|assists?|passing yards?|rushing yards?|receiving yards?|strikeouts?|home runs?|shots?|saves?|kills?|aces?)\b/i.test(question) && THRESHOLD_RE.test(question)) return "sports_player_prop";
-    if (/^[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}\s+(?:over|under|above|below|at least|at most)\s+\d/i.test(question) && /\b(points?|goals?|runs?|rebounds?|assists?|yards?|kills?|shots?|saves?)\b/i.test(question)) return "sports_player_prop";
+    if (looksLikeHistoricalPlayerProp(question)) return "sports_player_prop";
     if (/\b(over|under)\b/i.test(question) && /\b(total|points?|goals?|runs?|rounds?|games?|sets?)\b/i.test(question)) return "sports_total";
     if (/\bexact score|correct score|score band|\d+(?:\.\d+)?\s*(?:-|–|to)\s*\d+(?:\.\d+)?\b/i.test(question)) return "sports_score_band";
     if (THRESHOLD_RE.test(question)) return "sports_threshold";
