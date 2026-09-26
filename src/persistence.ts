@@ -2870,7 +2870,7 @@ export async function settlePaperTrade(input:{
   return {configured:true,updated:true,netPnlUsd:net,realizedRoiPct:roi};
 }
 
-export async function getPaperTradingStats() {
+export async function getPaperTradingStats(strategyPrefix = "") {
   if(!pool) return {configured:false,reason:"not_configured"};
   await ensurePaperTradingSchema();
   const {rows}=await pool.query(`
@@ -2889,7 +2889,8 @@ export async function getPaperTradingStats() {
       max(entry_at) as "lastEntryAt",
       max(resolved_at) as "lastResolvedAt"
     from polymarket_brain.paper_trades
-  `);
+    where ($1 = '' or strategy_id like $1)
+  `,[strategyPrefix ? strategyPrefix + '%' : '']);
   const daily = await pool.query(`
     with daily as (
       select
@@ -2899,6 +2900,7 @@ export async function getPaperTradingStats() {
         coalesce(sum(net_pnl_usd),0)::float8 as net_pnl_usd
       from polymarket_brain.paper_trades
       where status in ('WIN','LOSS')
+        and ($1 = '' or strategy_id like $1)
       group by 1
     )
     select
@@ -2911,7 +2913,7 @@ export async function getPaperTradingStats() {
       min(net_pnl_usd)::float8 as "worstDayNetPnlUsd",
       max(net_pnl_usd)::float8 as "bestDayNetPnlUsd"
     from daily
-  `);
+  `,[strategyPrefix ? strategyPrefix + '%' : '']);
 
   const row=rows[0]||{};
   const dailyRow=daily.rows[0]||{};
@@ -2949,7 +2951,7 @@ export async function getPaperTradingStats() {
 export async function getPaperTradingStatsForStrategyPrefix(prefix:string) {
   if(!pool) return {configured:false,reason:"not_configured"};
   await ensurePaperTradingSchema();
-  const like=String(prefix||"").replace(/[%_]/g,match=>"\\\\%_".includes(match) ? "\\"+match : match)+"%";
+  const like=String(prefix||"")+"%";
   const {rows}=await pool.query(`
     select
       count(*) filter (where status <> 'VOID')::int as "trades",
@@ -2960,7 +2962,7 @@ export async function getPaperTradingStatsForStrategyPrefix(prefix:string) {
       coalesce(sum(net_pnl_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "netPnlUsd",
       coalesce(sum(stake_usd) filter (where status in ('WIN','LOSS')),0)::float8 as "resolvedStakeUsd"
     from polymarket_brain.paper_trades
-    where strategy_id like $1 escape '\\'
+    where strategy_id like $1
   `,[like]);
   const row=rows[0]||{};
   const resolved=Number(row.wins||0)+Number(row.losses||0);
