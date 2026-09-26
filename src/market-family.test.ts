@@ -15,12 +15,36 @@ describe("classifyMarketFamily", () => {
     expect(classifyMarketFamily({domain:"sports",question:"Will Team A score 3+ goals?",outcomeCount:2})).toBe("sports_threshold");
   });
 
+  it("keeps multi-outcome sports score markets in a sports family", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Correct score",
+      outcomeCount:8,
+      sportsKind:"exact_score"
+    })).toBe("sports_score_band");
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Goals score band",
+      outcomeCount:5,
+      sportsKind:"score_band"
+    })).toBe("sports_score_band");
+  });
+
+  it("keeps multi-outcome sports props distinct when official structure identifies them", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"LeBron James points",
+      outcomeCount:4,
+      sportsKind:"player_prop"
+    })).toBe("sports_player_prop");
+  });
+
   it("recognizes non-sports threshold markets", () => {
     expect(classifyMarketFamily({domain:"crypto",question:"Will Bitcoin be above $100,000?",outcomeCount:2})).toBe("crypto_threshold");
     expect(classifyMarketFamily({domain:"weather",question:"Will temperature exceed 90 degrees?",outcomeCount:2})).toBe("weather_threshold");
   });
 
-  it("keeps arbitrary multi-outcome markets separate from binary calibration", () => {
+  it("keeps arbitrary multi-outcome non-sports markets separate from binary calibration", () => {
     expect(classifyMarketFamily({domain:"other",question:"Who will win?",outcomeCount:5})).toBe("multi_outcome");
   });
 });
