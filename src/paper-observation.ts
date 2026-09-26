@@ -17,6 +17,7 @@ export function selectObservationCandidates(
     minLiquidityUsd?:number;
     minPrice?:number;
     maxPrice?:number;
+    excludedKeys?:Set<string>;
   }
 ):ObservationSelection[] {
   const limit=Math.max(1,Math.min(2000,Number(options?.limit??500)));
@@ -56,7 +57,7 @@ export function selectObservationCandidates(
 
     const condition=String(candidate.conditionId||candidate.id||candidate.slug||candidate.question||"");
     const key=`${condition}:${tokenId}`;
-    if(!condition || seen.has(key)) continue;
+    if(!condition || seen.has(key) || options?.excludedKeys?.has(key)) continue;
 
     const family=marketFamilyFromCandidate(candidate,"sports");
     const bucket=byFamily.get(family) || [];
