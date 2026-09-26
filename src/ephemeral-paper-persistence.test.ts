@@ -9,6 +9,9 @@ import {
   getEphemeralOpenTrades,
   getEphemeralPaperPersistenceStatus,
   getEphemeralPaperStats,
+  getStructuralBasketPaperStats,
+  listStructuralBasketPaper,
+  recordStructuralBasketPaper,
   resetEphemeralPaperLab,
   settleEphemeralPaperTrade
 } from "./ephemeral-paper-lab.js";
@@ -86,6 +89,31 @@ describe("durable ephemeral paper ledger",()=>{
     expect(stats.resolvedTrades).toBe(1);
     expect(stats.wins).toBe(1);
     expect(stats.netPnlUsd).toBeGreaterThan(0);
+  });
+
+  it("persists and restores structural basket observations without double-counting repeated scans", async()=>{
+    const file=await statePath();
+    configureEphemeralPaperPersistence(file);
+    const first=recordStructuralBasketPaper({
+      eventId:"event-1",eventTitle:"Three-way event",marketCount:3,
+      yesTokenIds:["a","b","c"],budgetUsd:100,netProfitUsd:2.5,netRoiPct:2.5
+    });
+    const repeat=recordStructuralBasketPaper({
+      eventId:"event-1",eventTitle:"Three-way event",marketCount:3,
+      yesTokenIds:["c","b","a"],budgetUsd:100,netProfitUsd:3,netRoiPct:3
+    });
+    expect(first.inserted).toBe(true);
+    expect(repeat.inserted).toBe(false);
+    expect(getStructuralBasketPaperStats().uniqueBaskets).toBe(1);
+    expect(getStructuralBasketPaperStats().sightings).toBe(2);
+    expect(listStructuralBasketPaper(10)[0]?.bestNetProfitUsd).toBe(3);
+
+    configureEphemeralPaperPersistence(null);
+    resetEphemeralPaperLab();
+    const loaded=configureEphemeralPaperPersistence(file);
+    expect(loaded.loadedStructuralBaskets).toBe(1);
+    expect(getStructuralBasketPaperStats().uniqueBaskets).toBe(1);
+    expect(getStructuralBasketPaperStats().sightings).toBe(2);
   });
 
   it("fails open to memory when the state file is unreadable", async()=>{
