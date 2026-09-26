@@ -38,6 +38,7 @@ import {
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
   getStaleHistoricalCalibrationRefs,
+  recordHistoricalCalibrationRebuildFailure,
   getPersistenceIntegrity,
   getStorageHealth,
   getPersistentStats,
@@ -158,9 +159,15 @@ async function getProductionStrategyPolicy(force = false) {
   }
 
   const calibrationSummary = await getHistoricalCalibrationSummary().catch(() => null) as any;
+  const minUsableCoveragePct = Math.max(
+    50,
+    Math.min(100, Number(process.env.CAUSAL_V2_MIN_USABLE_COVERAGE_PCT || 80))
+  );
+  const usableCoveragePct = Number(calibrationSummary?.causalV2UsableCoveragePct || 0);
   const calibrationComplete =
     Number(calibrationSummary?.sampleCount || 0) > 0 &&
-    Number(calibrationSummary?.causalV2Remaining || 0) === 0;
+    Number(calibrationSummary?.causalV2Remaining || 0) === 0 &&
+    usableCoveragePct >= minUsableCoveragePct;
 
   const domains = ["sports","crypto","weather","other"] as const;
   const replays = await Promise.all(domains.map(async domain => {
@@ -225,7 +232,11 @@ async function getProductionStrategyPolicy(force = false) {
       progressPct:Number(calibrationSummary?.causalV2ProgressPct || 0),
       remaining:Number(calibrationSummary?.causalV2Remaining || 0),
       totalRows:Number(calibrationSummary?.sampleCount || 0),
-      causalRows:Number(calibrationSummary?.causalV2Samples || 0)
+      causalRows:Number(calibrationSummary?.causalV2Samples || 0),
+      excludedRows:Number(calibrationSummary?.causalV2Excluded || 0),
+      usableCoveragePct,
+      minUsableCoveragePct,
+      rebuildProgressPct:Number(calibrationSummary?.causalRebuildProgressPct || 0)
     },
     structuralStrategiesEnabled:true,
     directionalProbabilityModelEnabled:enabledDomains.length > 0,
@@ -2765,25 +2776,40 @@ async function runHistoricalBackfillWorker() {
 
         for (let i = 0; i < stale.length && Date.now() - runStarted < budgetMs; i += 6) {
           const batch = stale.slice(i, i + 6);
-          const samples = await Promise.all(batch.map(async ref => {
+          const results = await Promise.all(batch.map(async ref => {
             try {
               const market = await getMarketBySlug(String(ref.slug || ""));
-              if (!market) return null;
-              return await buildHistoricalCalibrationSample(market);
-            } catch {
-              return null;
+              if (!market) {
+                return { ref, sample:null, reason:"market_lookup_unavailable" };
+              }
+              const sample = await buildHistoricalCalibrationSample(market);
+              return sample
+                ? { ref, sample, reason:null }
+                : { ref, sample:null, reason:"causal_price_history_unavailable" };
+            } catch (error) {
+              return { ref, sample:null, reason:errorMessage(error) };
             }
           }));
-          for (const sample of samples) {
-            if (!sample) { directSkipped += 1; continue; }
-            await upsertHistoricalCalibrationSample(sample);
+          for (const result of results) {
+            if (!result.sample) {
+              directSkipped += 1;
+              await recordHistoricalCalibrationRebuildFailure(
+                String(result.ref.conditionId || ""),
+                String(result.reason || "unknown_rebuild_failure"),
+                5
+              ).catch(() => null);
+              continue;
+            }
+            await upsertHistoricalCalibrationSample(result.sample);
             directStored += 1;
           }
         }
 
-        // If the queue head is entirely unbuildable, stop this direct pass so
-        // the worker can fall back to date-window discovery instead of spinning.
-        if (directStored === 0 && directSkipped >= stale.length) break;
+        // Failed rows are moved to the back of the retry queue by updating
+        // their attempt metadata, so the same unrebuildable head cannot stall
+        // the other historical rows. After repeated failures they are explicitly
+        // quarantined from strategy data rather than silently treated as causal.
+
       }
 
       const refreshed = await getHistoricalCalibrationSummary().catch(() => null) as any;
