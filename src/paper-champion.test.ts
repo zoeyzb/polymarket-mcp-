@@ -37,6 +37,25 @@ describe("paper champion selection", () => {
     expect(new Set(picks.map(p=>p.id)).size).toBe(4);
   });
 
+  it("can exclude already-open strict positions before ranking", () => {
+    const candidates=[
+      {id:"open",domain:"sports",family:"sports_score_band",entryPrice:0.985,liquidityUsd:5000,minutesRemaining:20},
+      {id:"fresh",domain:"sports",family:"sports_total",entryPrice:0.94,liquidityUsd:5000,minutesRemaining:30}
+    ];
+    const picks=chooseChampionPortfolio(candidates.filter(c=>c.id!=="open"),{maxPicks:4,maxPerFamily:1});
+    expect(picks.map(p=>p.id)).toEqual(["fresh"]);
+  });
+
+  it("limits strict champion concentration by market family", () => {
+    const picks=chooseChampionPortfolio([
+      {id:"score1",domain:"sports",family:"sports_score_band",entryPrice:0.985,liquidityUsd:5000,minutesRemaining:20},
+      {id:"score2",domain:"sports",family:"sports_score_band",entryPrice:0.984,liquidityUsd:5000,minutesRemaining:21},
+      {id:"total",domain:"sports",family:"sports_total",entryPrice:0.94,liquidityUsd:5000,minutesRemaining:30},
+      {id:"spread",domain:"sports",family:"sports_spread",entryPrice:0.93,liquidityUsd:5000,minutesRemaining:40}
+    ],{maxPicks:4,maxPerFamily:1});
+    expect(picks.map(p=>p.family)).toEqual(["sports_score_band","sports_total","sports_spread"]);
+  });
+
   it("does not select exploratory candidates below 80 percent implied probability", () => {
     expect(chooseChampionCandidate([
       {id:"a",domain:"sports",family:"sports_total",entryPrice:0.79,liquidityUsd:5000,minutesRemaining:20}
