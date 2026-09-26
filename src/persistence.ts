@@ -2722,6 +2722,35 @@ export async function createPaperTrade(input: {
   return { configured:true,inserted:rows.length > 0,id:rows[0]?.id ?? null };
 }
 
+export async function voidNonProductionOpenPaperTrades(enabledDomains: string[]) {
+  if (!pool) return { configured:false, reason:"not_configured", voided:0 };
+  await ensurePaperTradingSchema();
+  const allowed = [...new Set(enabledDomains.map(value => String(value || "").trim()).filter(Boolean))];
+  const result = await pool.query(
+    `update polymarket_brain.paper_trades
+       set status='VOID',
+           updated_at=now(),
+           policy_snapshot =
+             coalesce(policy_snapshot,'{}'::jsonb) ||
+             jsonb_build_object(
+               'voidedReason',
+               case
+                 when not (coalesce(domain,'') = any($1::text[]))
+                   then 'production_domain_disabled:' || coalesce(domain,'unknown')
+                 else 'legacy_nonproduction_shadow_policy'
+               end,
+               'voidedAt',now()
+             )
+       where status='OPEN'
+         and (
+           not (coalesce(domain,'') = any($1::text[]))
+           or strategy_id not like 'calendar_walk_forward_%'
+         )`,
+    [allowed]
+  );
+  return { configured:true, voided:result.rowCount ?? 0, enabledDomains:allowed };
+}
+
 export async function voidInvalidOpenPaperTrades(minExpectedRoiPct = 0.25) {
   if (!pool) return { configured:false, reason:"not_configured", voided:0 };
   await ensurePaperTradingSchema();
