@@ -1006,7 +1006,7 @@ export function runCalendarWalkForwardEdgeBacktest(
       const avgRoi=rois.reduce((a,b)=>a+b,0)/rois.length;
       const totalTrades=folds.reduce((s,f)=>s+f.trades,0);
       const score=minRoi*Math.sqrt(totalTrades)+avgRoi;
-      candidateResults.push({threshold,minEdgeBps,folds,minRoi,avgRoi,totalTrades,score});
+      candidateResults.push({threshold,minEdgeBps,folds,abstainedFolds,minRoi,avgRoi,totalTrades,score});
     }
   }
 
