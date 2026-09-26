@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { parseJsonBody, RequestBodyError } from "./http-body.js";
 import { createDbBackoff } from "./db-backoff.js";
 import { collectRealtimeTargetTokens } from "./realtime-targets.js";
+import { serviceOwnsEphemeralPaperLedger } from "./paper-process-role.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -2804,6 +2805,7 @@ let walletIntelligenceRunning = false;
 let maintenanceRunning = false;
 let paperEntryRunning = false;
 let paperSettlementRunning = false;
+let ephemeralPaperSettlementRunning=false;
 const BACKGROUND_SCAN_SECONDS = Math.max(30, Number(process.env.BACKGROUND_SCAN_SECONDS || 60));
 const STRUCTURAL_SCAN_SECONDS = Math.max(900, Number(process.env.STRUCTURAL_SCAN_SECONDS || 1800));
 const PERSIST_SCAN_SECONDS = Math.max(BACKGROUND_SCAN_SECONDS, Number(process.env.PERSIST_SCAN_SECONDS || 300));
@@ -2835,6 +2837,7 @@ const PERSIST_CANDIDATE_LIMIT = Math.max(50, Math.min(500, Number(process.env.PE
 const PERSIST_PACKET_LIMIT = Math.max(50, Math.min(500, Number(process.env.PERSIST_PACKET_LIMIT || 250)));
 const PAPER_TRADING_ENABLED = String(process.env.PAPER_TRADING_ENABLED || "false").toLowerCase() === "true";
 const PAPER_TRADING_SECONDS = Math.max(60, Number(process.env.PAPER_TRADING_SECONDS || 300));
+const EPHEMERAL_PAPER_SETTLEMENT_SECONDS=Math.max(30,Number(process.env.EPHEMERAL_PAPER_SETTLEMENT_SECONDS || 60));
 const PAPER_TRADE_STAKE_USD = Math.max(1, Math.min(100, Number(process.env.PAPER_TRADE_STAKE_USD || 25)));
 const PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE =
   String(process.env.PAPER_TRADE_REQUIRE_CAUSAL_COMPLETE || "true").toLowerCase() !== "false";
@@ -4201,11 +4204,28 @@ async function runPaperEntryWorker() {
   }
 }
 
+async function runEphemeralPaperSettlementWorker() {
+  if (!PAPER_TRADING_ENABLED || ephemeralPaperSettlementRunning || !serviceOwnsEphemeralPaperLedger(SERVICE_ROLE)) return;
+  ephemeralPaperSettlementRunning=true;
+  try {
+    await settleEphemeralPaperTrades();
+  } catch(error) {
+    console.error(JSON.stringify({
+      level:"error",
+      message:"ephemeral_paper_settlement_failed",
+      serviceRole:SERVICE_ROLE,
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+  } finally {
+    ephemeralPaperSettlementRunning=false;
+  }
+}
+
 async function runPaperSettlementWorker() {
   if (!PAPER_TRADING_ENABLED || paperSettlementRunning) return;
   paperSettlementRunning=true;
   try {
-    await settleEphemeralPaperTrades();
     const open=await getOpenPaperTrades(500);
     let resolved=0;
     for(const trade of open as any[]) {
@@ -4649,6 +4669,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     setInterval(() => {
       runBackgroundScan().catch(() => {});
     }, BACKGROUND_SCAN_SECONDS * 1000).unref();
+
+    runEphemeralPaperSettlementWorker().catch(() => {});
+    setInterval(() => {
+      runEphemeralPaperSettlementWorker().catch(() => {});
+    }, EPHEMERAL_PAPER_SETTLEMENT_SECONDS * 1000).unref();
 
     runPaperEntryWorker().catch(() => {});
     setInterval(() => {
