@@ -1035,6 +1035,88 @@ export async function upsertHistoricalCalibrationSample(sample: HistoricalCalibr
   return { configured: true, upserted: result.rowCount ?? 0 };
 }
 
+export async function getLiveChosenOutcomeCalibration(input: {
+  domain: string;
+  horizon: string;
+  outcomeIndex: 0 | 1;
+  threshold: number;
+  quotedPrice: number;
+  binSize: number;
+  resolvedBefore?: string;
+}) {
+  if (!pool) return { configured:false, reason:"not_configured", samples:0 };
+
+  const domain = String(input.domain || "other");
+  const horizon = String(input.horizon || "tMinus60m");
+  const outcomeIndex = input.outcomeIndex === 1 ? 1 : 0;
+  const threshold = Math.max(0.5, Math.min(0.999, Number(input.threshold)));
+  const quotedPrice = Math.max(0.000001, Math.min(0.999999, Number(input.quotedPrice)));
+  const binSize = Math.max(0.01, Math.min(0.2, Number(input.binSize || 0.05)));
+  const resolvedBefore = input.resolvedBefore || new Date().toISOString();
+  const bucketLow = Math.max(0, Math.min(0.999, Math.floor(quotedPrice / binSize) * binSize));
+  const bucketHigh = Math.min(1, bucketLow + binSize);
+
+  const { rows } = await pool.query(
+    `with eligible as (
+       select
+         (prices->>$2)::float8 as p0,
+         actual_outcome0::int as actual_outcome0
+       from polymarket_brain.historical_calibration
+       where domain=$1
+         and source_payload->>'calibrationVersion'='v2-causal-price'
+         and resolved_at < $3::timestamptz
+         and prices ? $2
+         and (prices->>$2)::float8 > 0
+         and (prices->>$2)::float8 < 1
+     ),
+     chosen as (
+       select
+         case when $4::int=0 then p0 else 1-p0 end as quoted_price,
+         case when $4::int=0 then actual_outcome0 else 1-actual_outcome0 end as won
+       from eligible
+       where
+         ($4::int=0 and p0 >= $5)
+         or
+         ($4::int=1 and p0 <= 1-$5)
+     )
+     select
+       count(*)::int as samples,
+       avg(quoted_price)::float8 as "avgPrice",
+       avg(won::float8)::float8 as "rawWinRate"
+     from chosen
+     where quoted_price >= $6
+       and quoted_price < $7`,
+    [domain,horizon,resolvedBefore,outcomeIndex,threshold,bucketLow,bucketHigh]
+  );
+
+  const row=rows[0] || {};
+  const samples=Number(row.samples || 0);
+  const avgPrice=Number(row.avgPrice);
+  const rawWinRate=Number(row.rawWinRate);
+  const priorWeight=20;
+  const wins = Number.isFinite(rawWinRate) ? rawWinRate * samples : 0;
+  const calibratedWinProbability =
+    samples > 0 && Number.isFinite(avgPrice)
+      ? (wins + priorWeight * avgPrice) / (samples + priorWeight)
+      : null;
+
+  return {
+    configured:true,
+    domain,
+    horizon,
+    outcomeIndex,
+    threshold,
+    bucketLow,
+    bucketHigh,
+    samples,
+    avgPrice:Number.isFinite(avgPrice) ? avgPrice : null,
+    rawWinRate:Number.isFinite(rawWinRate) ? rawWinRate : null,
+    calibratedWinProbability:
+      calibratedWinProbability == null ? null : Number(calibratedWinProbability.toFixed(8)),
+    resolvedBefore
+  };
+}
+
 export async function getPriceBucketCalibration(options?: {
   bucketSize?: number;
   minSamples?: number;

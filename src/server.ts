@@ -31,6 +31,7 @@ import {
   getHistoricalCandidateStats,
   getHistoricalReplaySamples,
   getLatestMultiHorizonSnapshot,
+  getLiveChosenOutcomeCalibration,
   getMultiHorizonSnapshotStats,
   getOpportunityIntelligenceStats,
   getPriceBucketCalibration,
@@ -95,6 +96,7 @@ import { runCalendarWalkForwardEdgeBacktest, runCalibratedEdgeBacktest, runProba
 import { buildUnifiedOpportunity, type OpportunityLane } from "./opportunity-object.js";
 import { renderDashboardHtml } from "./dashboard.js";
 import type { NormalizedBook, ScanCandidate } from "./types.js";
+import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -2873,6 +2875,17 @@ async function runPaperEntryWorker() {
           `domain_routing_mismatch:${storedDomain}->${correctedDomain}`
         ).catch(() => null);
         if ((result as any)?.updated) voidedDomainMismatches += 1;
+        continue;
+      }
+
+      const effectiveDomain = correctedDomain !== "other" ? correctedDomain : storedDomain;
+      if (policy?.perDomain?.[effectiveDomain]?.enabled !== true) {
+        await voidPaperTrade(trade.id, `production_domain_disabled:${effectiveDomain}`).catch(() => null);
+        continue;
+      }
+
+      if (!String(trade.strategyId || "").startsWith("calendar_walk_forward_")) {
+        await voidPaperTrade(trade.id, "legacy_nonproduction_shadow_policy").catch(() => null);
       }
     }
 
@@ -2888,14 +2901,17 @@ async function runPaperEntryWorker() {
       const domain=strategyDomainForMarket(candidate.primaryCategory,candidate.question,candidate.slug);
       if (domain === "political") continue;
 
-      const researchPolicy=policy?.perDomain?.[domain]?.sampleWalkForward;
-      const selected=researchPolicy?.selectedPolicy;
-      if (!selected) continue;
+      const domainPolicy=policy?.perDomain?.[domain];
+      if (domainPolicy?.enabled !== true) continue;
 
-      const holdoutRoiPct=Number(researchPolicy?.holdout?.roiPct ?? -Infinity);
-      const holdoutHitRatePct=Number(researchPolicy?.holdout?.hitRatePct ?? 0);
-      const holdoutTrades=Number(researchPolicy?.holdout?.trades ?? 0);
-      const minFoldRoiPct=Number(researchPolicy?.foldSummary?.minRoiPct ?? -Infinity);
+      const productionPolicy=domainPolicy?.calendarWalkForward;
+      const selected=productionPolicy?.selectedPolicy;
+      if (!selected || productionPolicy?.deployable !== true) continue;
+
+      const holdoutRoiPct=Number(productionPolicy?.holdout?.roiPct ?? -Infinity);
+      const holdoutHitRatePct=Number(productionPolicy?.holdout?.hitRatePct ?? 0);
+      const holdoutTrades=Number(productionPolicy?.holdout?.trades ?? 0);
+      const minFoldRoiPct=Number(productionPolicy?.foldSummary?.minRoiPct ?? -Infinity);
       const positiveResearchGate =
         holdoutRoiPct >= PAPER_TRADE_MIN_HOLDOUT_ROI_PCT &&
         minFoldRoiPct >= PAPER_TRADE_MIN_FOLD_ROI_PCT &&
@@ -2926,10 +2942,30 @@ async function runPaperEntryWorker() {
 
       const stake=Math.min(PAPER_TRADE_STAKE_USD,Number(execution.spendableUsd||execution.budgetUsd||0));
       if (!(stake > 0)) continue;
+
+      const chosenQuotedPrice=outcomeIndex===0 ? p0 : 1-p0;
+      const liveCalibration=await getLiveChosenOutcomeCalibration({
+        domain,
+        horizon:"tMinus60m",
+        outcomeIndex:outcomeIndex as 0|1,
+        threshold,
+        quotedPrice:chosenQuotedPrice,
+        binSize:Number(selected.binSize ?? 0.05),
+        resolvedBefore:new Date().toISOString()
+      });
+      const liveEvaluation=evaluateLiveCalibratedEntry({
+        calibratedWinProbability:Number((liveCalibration as any)?.calibratedWinProbability),
+        executionPrice:Number(execution.avgFillPrice),
+        minEdgeBps:Number(selected.minEdgeBps ?? 0),
+        feeRate:paperFeeRate(domain),
+        samples:Number((liveCalibration as any)?.samples || 0),
+        minSamples:Number(selected.minBinSamples ?? 20)
+      });
+      if (!liveEvaluation.pass) continue;
       considered += 1;
 
       const result=await createPaperTrade({
-        strategyId:`sample_walk_forward_${domain}_tMinus60m`,
+        strategyId:`calendar_walk_forward_${domain}_tMinus60m`,
         calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
         conditionId:candidate.conditionId,
         marketId:candidate.id,
@@ -2942,23 +2978,26 @@ async function runPaperEntryWorker() {
         expectedResolutionAt:candidate.endDate,
         entryPrice:Number(execution.avgFillPrice),
         stakeUsd:stake,
-        expectedEdgeBps:Number(selected.minEdgeBps ?? 0),
-        expectedRoiPct:holdoutRoiPct,
+        expectedEdgeBps:liveEvaluation.expectedEdgeBps,
+        expectedRoiPct:liveEvaluation.expectedNetRoiPct,
         feeRate:paperFeeRate(domain),
         policySnapshot:{
           selectedPolicy:selected,
-          researchDeployable:researchPolicy?.deployable === true,
+          productionDeployable:productionPolicy?.deployable === true,
           shadowPositiveRoiGate:true,
           minFoldRoiPct,
           holdoutRoiPct,
           holdoutHitRatePct,
           holdoutTrades,
-          productionDomainEnabled:policy?.perDomain?.[domain]?.enabled === true,
+          productionDomainEnabled:true,
+          liveCalibration,
+          liveEvaluation,
           calibration:policy?.calibration || null
         },
         marketSnapshot:{
           minutesRemaining:candidate.minutesRemaining,
           displayedOutcomePrices:candidate.displayedOutcomePrices,
+          chosenQuotedPrice,
           bestAsk:book.bestAsk,
           avgFillPrice:execution.avgFillPrice,
           fillPct:execution.fillPct,
