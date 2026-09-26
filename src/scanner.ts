@@ -38,7 +38,7 @@ import type {
   MultiHorizonLane
 } from "./types.js";
 
-const BUDGETS = [10, 25, 50, 100];
+const BUDGETS = [10, 25, 50, 100, 250, 500, 1000];
 const DEFAULT_BUFFER_BPS = Math.max(0, Number(process.env.OPPORTUNITY_BUFFER_BPS || 50));
 
 function n(value: unknown): number {
