@@ -39,6 +39,34 @@ describe("classifyMarketFamily", () => {
     })).toBe("sports_player_prop");
   });
 
+  it("does not mistake ISO dates for sports score bands", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Will Vitesse Arnhem win on 2026-09-26?",
+      outcomeCount:2,
+      sportsKind:"other_sports"
+    })).toBe("sports_moneyline");
+  });
+
+  it("lets explicit O/U wording override a bad score-band hint", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Granada CF vs. FC Andorra: O/U 6.5",
+      outcomeCount:2,
+      sportsKind:"score_band",
+      sportsScope:"full_game"
+    })).toBe("sports_total");
+  });
+
+  it("preserves actual exact-score markets as score bands", () => {
+    expect(classifyMarketFamily({
+      domain:"sports",
+      question:"Exact Score: Heracles Almelo 3 - 3 Vitesse Arnhem?",
+      outcomeCount:2,
+      sportsKind:"score_band"
+    })).toBe("sports_score_band");
+  });
+
   it("recognizes non-sports threshold markets", () => {
     expect(classifyMarketFamily({domain:"crypto",question:"Will Bitcoin be above $100,000?",outcomeCount:2})).toBe("crypto_threshold");
     expect(classifyMarketFamily({domain:"weather",question:"Will temperature exceed 90 degrees?",outcomeCount:2})).toBe("weather_threshold");
