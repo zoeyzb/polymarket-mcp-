@@ -851,6 +851,7 @@ export async function getStaleHistoricalCalibrationRefs(
        updated_at as "updatedAt"
      from polymarket_brain.historical_calibration
      where coalesce(source_payload->>'calibrationVersion','') <> $1
+       and coalesce(source_payload->>'causalRebuildStatus','') <> 'unavailable'
        and slug is not null
        and slug <> ''
      order by updated_at asc, resolved_at desc
@@ -862,6 +863,44 @@ export async function getStaleHistoricalCalibrationRefs(
     resolvedAt: row.resolvedAt ? new Date(row.resolvedAt).toISOString() : null,
     updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : null
   }));
+}
+
+export async function recordHistoricalCalibrationRebuildFailure(
+  conditionId: string,
+  reason: string,
+  maxAttempts = 3
+) {
+  if (!pool || !conditionId) return { configured:false, reason:"not_configured_or_missing_id" };
+  const boundedAttempts = Math.max(1, Math.min(10, maxAttempts));
+  const { rows } = await pool.query(
+    `update polymarket_brain.historical_calibration
+       set source_payload =
+         coalesce(source_payload,'{}'::jsonb) ||
+         jsonb_build_object(
+           'causalRebuildAttempts',
+           coalesce((source_payload->>'causalRebuildAttempts')::int,0) + 1,
+           'causalRebuildStatus',
+           case
+             when coalesce((source_payload->>'causalRebuildAttempts')::int,0) + 1 >= $3
+               then 'unavailable'
+             else 'retry'
+           end,
+           'causalRebuildReason',$2,
+           'causalRebuildAttemptedAt',now()
+         ),
+         updated_at = now()
+       where condition_id=$1
+       returning
+         coalesce((source_payload->>'causalRebuildAttempts')::int,0) as attempts,
+         source_payload->>'causalRebuildStatus' as status`,
+    [conditionId, reason.slice(0,500), boundedAttempts]
+  );
+  return {
+    configured:true,
+    updated:rows.length>0,
+    attempts:Number(rows[0]?.attempts||0),
+    status:rows[0]?.status||null
+  };
 }
 
 export async function getKnownHistoricalCalibrationIds(
@@ -1004,6 +1043,10 @@ export async function getHistoricalCalibrationSummary() {
         where source_payload->>'calibrationVersion' = 'v2-causal-price'
       )::int as "causalV2Samples",
       count(*) filter (
+        where coalesce(source_payload->>'calibrationVersion','') <> 'v2-causal-price'
+          and source_payload->>'causalRebuildStatus' = 'unavailable'
+      )::int as "causalV2Excluded",
+      count(*) filter (
         where domain='sports' and source_payload->>'calibrationVersion' = 'v2-causal-price'
       )::int as "causalV2SportsSamples",
       count(*) filter (
@@ -1031,6 +1074,7 @@ export async function getHistoricalCalibrationSummary() {
         (kv.value #>> '{}')::numeric as brier
       from polymarket_brain.historical_calibration h
       cross join lateral jsonb_each(h.brier) kv
+      where h.source_payload->>'calibrationVersion' = 'v2-causal-price'
     )
     select
       domain,
@@ -1045,11 +1089,15 @@ export async function getHistoricalCalibrationSummary() {
 
   const total = Number(totals.rows[0]?.sampleCount || 0);
   const causal = Number(totals.rows[0]?.causalV2Samples || 0);
+  const excluded = Number(totals.rows[0]?.causalV2Excluded || 0);
+  const remaining = Math.max(0, total - causal - excluded);
   return {
     configured: true,
     ...totals.rows[0],
-    causalV2Remaining: Math.max(0, total - causal),
+    causalV2Remaining: remaining,
     causalV2ProgressPct: total > 0 ? Number(((causal / total) * 100).toFixed(2)) : 0,
+    causalRebuildProgressPct: total > 0 ? Number((((causal + excluded) / total) * 100).toFixed(2)) : 0,
+    causalV2UsableCoveragePct: total > 0 ? Number(((causal / total) * 100).toFixed(2)) : 0,
     horizons: horizons.rows
   };
 }
