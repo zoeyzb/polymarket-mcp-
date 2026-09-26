@@ -134,7 +134,8 @@ function extractLine(market: GammaMarket, text: string): number | null {
 
   const patterns = [
     /\(([+-]?\d+(?:\.\d+)?)\)/,
-    /\b(?:o\/u|over\/under)\s*[: ]?\s*([+-]?\d+(?:\.\d+)?)/i,\n    /\b(?:over|under|total|spread|line)\s*[: ]\s*([+-]?\d+(?:\.\d+)?)/i,
+    /\b(?:o\/u|over\/under)\s*[: ]?\s*([+-]?\d+(?:\.\d+)?)/i,
+    /\b(?:over|under|total|spread|line)\s*[: ]\s*([+-]?\d+(?:\.\d+)?)/i,
     /\b([+-]?\d+(?:\.\d+)?)\s*(?:points?|goals?|runs?|rebounds?|assists?|yards?|kills?)\b/i
   ];
   for (const re of patterns) {
