@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { parseJsonBody, RequestBodyError } from "./http-body.js";
+import { createDbBackoff } from "./db-backoff.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -130,6 +131,43 @@ const ROLE_SCANNER = SERVICE_ROLE === "all" || SERVICE_ROLE === "scanner";
 const ROLE_STREAMS = SERVICE_ROLE === "all" || SERVICE_ROLE === "streams";
 const ROLE_HISTORY = SERVICE_ROLE === "all" || SERVICE_ROLE === "history";
 const ROLE_MAINTENANCE = SERVICE_ROLE === "all" || SERVICE_ROLE === "maintenance";
+
+const DB_QUOTA_BACKOFF = createDbBackoff({
+  baseMs:Math.max(5_000,Number(process.env.DB_QUOTA_BACKOFF_BASE_MS || 60_000)),
+  maxMs:Math.max(60_000,Number(process.env.DB_QUOTA_BACKOFF_MAX_MS || 15*60_000))
+});
+
+function dbQuotaSkip(worker:string){
+  if(DB_QUOTA_BACKOFF.shouldAttempt()) return false;
+  const status=DB_QUOTA_BACKOFF.status();
+  console.warn(JSON.stringify({
+    level:"warn",
+    message:"db_quota_backoff_skip",
+    worker,
+    remainingMs:status.remainingMs,
+    retryAt:status.retryAt,
+    failures:status.failures,
+    at:new Date().toISOString()
+  }));
+  return true;
+}
+
+function noteDbWorkerFailure(worker:string,error:unknown){
+  const opened=DB_QUOTA_BACKOFF.noteFailure(error);
+  if(opened.opened){
+    console.warn(JSON.stringify({
+      level:"warn",
+      message:"db_quota_backoff_opened",
+      worker,
+      ...opened,
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+    return true;
+  }
+  return false;
+}
+
 
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -2188,6 +2226,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       tradingEnabled: String(process.env.TRADING_ENABLED || "false").toLowerCase() === "true",
       tradeIntentsEnabled: String(process.env.TRADING_INTENTS_ENABLED || "false").toLowerCase() === "true",
     serviceRole: SERVICE_ROLE,
+      dbQuotaBackoff:DB_QUOTA_BACKOFF.status(),
       maxScannerWindowMinutes: 120,
       now: new Date().toISOString()
     });
@@ -2705,7 +2744,7 @@ const httpServer = createServer(async (req, res) => {
 let heartbeatRunning = false;
 
 async function runWorkerHeartbeat() {
-  if (heartbeatRunning) return;
+  if (heartbeatRunning || dbQuotaSkip("worker_heartbeat")) return;
   heartbeatRunning = true;
   try {
     const details: Record<string, unknown> = {
@@ -2730,7 +2769,9 @@ async function runWorkerHeartbeat() {
     }
 
     await upsertWorkerHeartbeat(SERVICE_ROLE, details);
+    DB_QUOTA_BACKOFF.noteSuccess();
   } catch (error) {
+    if (noteDbWorkerFailure("worker_heartbeat",error)) return;
     console.error(JSON.stringify({
       level: "error",
       message: "worker_heartbeat_failed",
@@ -3024,12 +3065,14 @@ async function runStructuralScan() {
 let realtimeTargetRefreshRunning = false;
 
 async function runRealtimeTargetRefresh() {
-  if (realtimeTargetRefreshRunning) return;
+  if (realtimeTargetRefreshRunning || dbQuotaSkip("realtime_target_refresh")) return;
   realtimeTargetRefreshRunning = true;
   try {
     const targets = await getRealtimeTargets();
     realtimeTracker.updateTokens(targets);
+    DB_QUOTA_BACKOFF.noteSuccess();
   } catch (error) {
+    if (noteDbWorkerFailure("realtime_target_refresh",error)) return;
     console.error(JSON.stringify({
       level: "error",
       message: "realtime_target_refresh_failed",
@@ -3042,7 +3085,7 @@ async function runRealtimeTargetRefresh() {
 }
 
 async function runStreamPersistenceWorker() {
-  if (streamPersistRunning) return;
+  if (streamPersistRunning || dbQuotaSkip("stream_persistence")) return;
   streamPersistRunning = true;
   try {
     const quotes = realtimeTracker.getQuotes();
@@ -3053,6 +3096,7 @@ async function runStreamPersistenceWorker() {
       persistSportsEvents(sportsEvents)
     ]);
 
+    DB_QUOTA_BACKOFF.noteSuccess();
     if ((quoteResult.inserted || 0) > 0 || (sportsResult.inserted || 0) > 0) {
       console.log(JSON.stringify({
         level: "info",
@@ -3063,6 +3107,7 @@ async function runStreamPersistenceWorker() {
       }));
     }
   } catch (error) {
+    if (noteDbWorkerFailure("stream_persistence",error)) return;
     console.error(JSON.stringify({
       level: "error",
       message: "stream_persistence_failed",
@@ -3075,10 +3120,11 @@ async function runStreamPersistenceWorker() {
 }
 
 async function runQuoteCompactionWorker() {
-  if (quoteCompactionRunning) return;
+  if (quoteCompactionRunning || dbQuotaSkip("quote_compaction")) return;
   quoteCompactionRunning = true;
   try {
     const result = await compactRealtimeQuotes(120);
+    DB_QUOTA_BACKOFF.noteSuccess();
     if ((result.barsUpserted || 0) > 0) {
       console.log(JSON.stringify({
         level: "info",
@@ -3088,6 +3134,7 @@ async function runQuoteCompactionWorker() {
       }));
     }
   } catch (error) {
+    if (noteDbWorkerFailure("quote_compaction",error)) return;
     console.error(JSON.stringify({
       level: "error",
       message: "quote_compaction_failed",
