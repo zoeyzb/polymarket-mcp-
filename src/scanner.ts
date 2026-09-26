@@ -1187,6 +1187,8 @@ export async function scanMultiHorizon(options?: {
   limitPerLane?: number;
   structuralLimit?: number;
   bufferBps?: number;
+  sourceMode?: "full" | "near_term";
+  nearTermMinutes?: number;
 }): Promise<MultiHorizonScanResult> {
   const started = Date.now();
   const now = started;
@@ -1201,8 +1203,30 @@ export async function scanMultiHorizon(options?: {
 
   const retained: ScanCandidate[] = [];
   const negRiskMarkets: GammaMarket[] = [];
+  const sourceMode = options?.sourceMode ?? "full";
+  const nearTermMinutes = Math.max(60, Math.min(1440, Number(options?.nearTermMinutes ?? 1440)));
 
-  for await (const page of iterateActiveMarketPages()) {
+  async function* marketPages() {
+    if (sourceMode === "near_term") {
+      const start = new Date(now - 60_000);
+      const end = new Date(now + nearTermMinutes * 60_000);
+      const markets = await listActiveMarketsEndingBetween(
+        start,
+        end,
+        Math.max(20, Number(process.env.NEAR_TERM_MAX_PAGES || 300)),
+        100
+      );
+      const chunkSize = Math.max(100, Math.min(1000, Number(process.env.NEAR_TERM_CHUNK_SIZE || 500)));
+      for (let i = 0; i < markets.length; i += chunkSize) {
+        yield markets.slice(i, i + chunkSize);
+      }
+      return;
+    }
+
+    for await (const page of iterateActiveMarketPages()) yield page;
+  }
+
+  for await (const page of marketPages()) {
     totalActiveMarketsScanned += page.length;
 
     const eligible = page.filter(market =>
