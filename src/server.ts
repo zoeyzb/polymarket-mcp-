@@ -2379,6 +2379,8 @@ const QUOTE_BAR_1M_RETENTION_HOURS = Math.max(1, Number(process.env.QUOTE_BAR_1M
 const QUOTE_BAR_5M_RETENTION_HOURS = Math.max(6, Number(process.env.QUOTE_BAR_5M_RETENTION_HOURS || 48));
 const CROSS_VENUE_RETENTION_DAYS = Math.max(7, Number(process.env.CROSS_VENUE_RETENTION_DAYS || 30));
 const SNAPSHOT_KEEP_COUNT = Math.max(2, Number(process.env.SNAPSHOT_KEEP_COUNT || 10));
+const TRUNCATE_REALTIME_AFTER_COMPACTION =
+  String(process.env.TRUNCATE_REALTIME_AFTER_COMPACTION || "true").toLowerCase() !== "false";
 const REALTIME_TARGET_TOKEN_LIMIT = Math.max(100, Math.min(2000, Number(process.env.REALTIME_TARGET_TOKEN_LIMIT || 400)));
 const PERSIST_CANDIDATE_LIMIT = Math.max(50, Math.min(500, Number(process.env.PERSIST_CANDIDATE_LIMIT || 250)));
 const PERSIST_PACKET_LIMIT = Math.max(50, Math.min(500, Number(process.env.PERSIST_PACKET_LIMIT || 250)));
@@ -2670,6 +2672,15 @@ async function runMaintenanceWorker() {
   if (maintenanceRunning) return;
   maintenanceRunning = true;
   try {
+    // Preserve minute/5-minute summaries before reclaiming disposable raw quote
+    // storage. This keeps chart/history utility while preventing raw-table bloat.
+    const preCleanupCompaction = await compactRealtimeQuotes(120).catch(error => ({
+      configured:false,
+      error:errorMessage(error),
+      barsUpserted:0,
+      bars5mUpserted:0
+    }));
+
     const result = await cleanupRawStreams(
       RAW_QUOTE_RETENTION_HOURS,
       SPORTS_EVENT_RETENTION_DAYS,
@@ -2680,12 +2691,14 @@ async function runMaintenanceWorker() {
         oneMinuteBarRetentionHours: QUOTE_BAR_1M_RETENTION_HOURS,
         fiveMinuteBarRetentionHours: QUOTE_BAR_5M_RETENTION_HOURS,
         crossVenueRetentionDays: CROSS_VENUE_RETENTION_DAYS,
-        snapshotKeepCount: SNAPSHOT_KEEP_COUNT
+        snapshotKeepCount: SNAPSHOT_KEEP_COUNT,
+        truncateRealtimeQuotes: TRUNCATE_REALTIME_AFTER_COMPACTION
       }
     );
     console.log(JSON.stringify({
       level: "info",
       message: "raw_stream_cleanup",
+      preCleanupCompaction,
       ...result,
       at: new Date().toISOString()
     }));
