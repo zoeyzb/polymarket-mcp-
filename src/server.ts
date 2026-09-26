@@ -100,6 +100,7 @@ import type { NormalizedBook, ScanCandidate } from "./types.js";
 import { evaluateLiveCalibratedEntry } from "./live-strategy.js";
 import { routeCandidateToValidatedHorizon, STRATEGY_HORIZONS, type StrategyHorizon } from "./horizon-routing.js";
 import { sizeBankrollTrade } from "./bankroll.js";
+import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -296,6 +297,20 @@ async function computeProductionStrategyPolicy(force = false) {
     domain,
     allSamples.filter(sample=>sample.domain===domain)
   ])) as Record<(typeof domains)[number],typeof allSamples>;
+
+  const minFamilySamples=Math.max(25,Number(process.env.MARKET_FAMILY_MIN_RESEARCH_SAMPLES || 75));
+  const familySamples=new Map<MarketFamily,typeof allSamples>();
+  for (const sample of allSamples) {
+    const family=classifyMarketFamily({
+      domain:sample.domain,
+      question:sample.question || "",
+      slug:sample.slug || null,
+      outcomeCount:2
+    });
+    const rows=familySamples.get(family) || [];
+    rows.push(sample);
+    familySamples.set(family,rows);
+  }
   const horizonReplays=domains.flatMap(domain => {
     const samples=samplesByDomain[domain];
     return STRATEGY_HORIZONS.map(horizon => ({
@@ -310,6 +325,24 @@ async function computeProductionStrategyPolicy(force = false) {
       })
     }));
   });
+
+  const familyReplays=[...familySamples.entries()]
+    .filter(([,samples])=>samples.length>=minFamilySamples)
+    .flatMap(([family,samples]) =>
+      STRATEGY_HORIZONS.map(horizon=>({
+        family,
+        domain:String(samples[0]?.domain || "other"),
+        horizon,
+        sampleCount:samples.length,
+        replay:buildHistoricalReplay(samples,{
+          years:3,
+          horizon,
+          threshold:0.9,
+          bufferBps:Number(process.env.OPPORTUNITY_BUFFER_BPS || 50),
+          domains:[String(samples[0]?.domain || "other")]
+        })
+      }))
+    );
 
   const perDomain: Record<string, any> = {};
   let totalSamples = 0;
@@ -361,13 +394,69 @@ async function computeProductionStrategyPolicy(force = false) {
     const enabledHorizons=STRATEGY_HORIZONS.filter(horizon=>horizons[horizon]?.enabled===true);
     const sampleCount=Math.max(0,...domainRows.map(row=>Number((row.replay as any)?.sampleCount||0)));
     totalSamples += sampleCount;
+    const familyRows=familyReplays.filter(row=>row.domain===domain);
+    const families:Record<string,any>={};
+    for (const family of [...new Set(familyRows.map(row=>row.family))]) {
+      const rows=familyRows.filter(row=>row.family===family);
+      const familyHorizons:Record<string,any>={};
+      for (const row of rows) {
+        const replay=row.replay as any;
+        const calendarWalk=replay.calendarWalkForward as any;
+        const walk=replay.walkForward as any;
+        const calibrated=replay.calibrated as any;
+        const familyEnabled=calibrationComplete && calendarWalk?.deployable===true;
+        familyHorizons[row.horizon]={
+          enabled:familyEnabled,
+          deployable:familyEnabled,
+          sampleCount:replay.sampleCount,
+          reason:calendarWalk?.reason || "calendar_walk_forward_unavailable",
+          calendarWalkForward:{
+            deployable:familyEnabled,
+            selectedPolicy:calendarWalk?.selectedPolicy ?? null,
+            foldSummary:calendarWalk?.foldSummary ?? null,
+            holdout:calendarWalk?.holdout ?? null,
+            holdoutDaily:calendarWalk?.holdoutDaily ?? null,
+            bankrollSimulation:calendarWalk?.bankrollSimulation ?? null,
+            dailyGrowthScore:calendarWalk?.dailyGrowthScore ?? null,
+            diagnostics:calendarWalk?.diagnostics ?? null,
+            requirements:calendarWalk?.requirements ?? null
+          },
+          sampleWalkForward:{
+            deployable:walk?.deployable===true,
+            selectedPolicy:walk?.selectedPolicy ?? null,
+            foldSummary:walk?.foldSummary ?? null,
+            holdout:walk?.holdout ?? null,
+            holdoutDaily:walk?.holdoutDaily ?? null,
+            requirements:walk?.requirements ?? null
+          },
+          calibratedResearch:{
+            deployable:calibrated?.deployable===true,
+            validation:calibrated?.validation ?? null,
+            holdout:calibrated?.holdout ?? null,
+            reason:calibrated?.reason ?? null
+          }
+        };
+      }
+      const enabledFamilyHorizons=STRATEGY_HORIZONS.filter(horizon=>familyHorizons[horizon]?.enabled===true);
+      families[family]={
+        enabled:enabledFamilyHorizons.length>0,
+        enabledHorizons:enabledFamilyHorizons,
+        sampleCount:Math.max(0,...rows.map(row=>Number((row.replay as any)?.sampleCount||0))),
+        reason:enabledFamilyHorizons.length ? "validated_family_horizon_available" : "family_not_deployable",
+        horizons:familyHorizons
+      };
+    }
+
     perDomain[domain] = {
-      enabled:enabledHorizons.length>0,
+      enabled:Object.values(families).some((family:any)=>family?.enabled===true),
       enabledHorizons,
+      enabledFamilies:Object.entries(families).filter(([,family]:any)=>family?.enabled===true).map(([family])=>family),
       sampleCount,
-      reason:enabledHorizons.length
-        ? "validated_horizon_available"
-        : compatibility?.reason || "no_validated_horizon",
+      minFamilySamples,
+      reason:Object.values(families).some((family:any)=>family?.enabled===true)
+        ? "validated_family_available"
+        : "no_validated_family",
+      families,
       horizons,
       calendarWalkForward:compatibility?.calendarWalkForward || {
         deployable:false,selectedPolicy:null,foldSummary:null,holdout:null,holdoutDaily:null,bankrollSimulation:null,dailyGrowthScore:null,diagnostics:null,requirements:null
@@ -3045,20 +3134,22 @@ async function runPaperEntryWorker() {
       if (domain === "political") { reject("political_disabled"); continue; }
 
       const domainPolicy=policy?.perDomain?.[domain];
-      if (domainPolicy?.enabled !== true) { reject(`domain_disabled:${domain}`); continue; }
+      const family=marketFamilyFromCandidate(candidate,domain);
+      const familyPolicy=domainPolicy?.families?.[family];
+      if (familyPolicy?.enabled !== true) { reject(`family_disabled:${family}`); continue; }
       const route=routeCandidateToValidatedHorizon(
         candidate.minutesRemaining,
         Object.fromEntries(STRATEGY_HORIZONS.map(horizon=>[
           horizon,
           {
-            enabled:domainPolicy?.horizons?.[horizon]?.enabled === true,
-            deployable:domainPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
+            enabled:familyPolicy?.horizons?.[horizon]?.enabled === true,
+            deployable:familyPolicy?.horizons?.[horizon]?.calendarWalkForward?.deployable === true
           }
         ])) as Partial<Record<StrategyHorizon,{enabled:boolean;deployable:boolean}>>,
         PAPER_TRADE_HORIZON_TOLERANCE_MINUTES
       );
-      if (!route) { reject("no_validated_horizon_in_tolerance"); continue; }
-      const horizonPolicy=domainPolicy?.horizons?.[route.horizon];
+      if (!route) { reject(`no_validated_family_horizon:${family}`); continue; }
+      const horizonPolicy=familyPolicy?.horizons?.[route.horizon];
       const productionPolicy=horizonPolicy?.calendarWalkForward;
       const selected=productionPolicy?.selectedPolicy;
       if (!selected || productionPolicy?.deployable !== true) { reject("production_policy_not_deployable"); continue; }
@@ -3132,7 +3223,7 @@ async function runPaperEntryWorker() {
       considered += 1;
 
       const result=await createPaperTrade({
-        strategyId:`calendar_walk_forward_${domain}_${route.horizon}`,
+        strategyId:`calendar_walk_forward_${domain}_${family}_${route.horizon}`,
         calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
         conditionId:candidate.conditionId,
         marketId:candidate.id,
@@ -3158,6 +3249,7 @@ async function runPaperEntryWorker() {
           holdoutTrades,
           productionDomainEnabled:true,
           routedHorizon:route,
+          marketFamily:family,
           dynamicSizingEnabled:PAPER_DYNAMIC_SIZING_ENABLED,
           liveCalibration,
           liveEvaluation,
