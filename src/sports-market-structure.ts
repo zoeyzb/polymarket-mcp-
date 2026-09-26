@@ -198,43 +198,47 @@ export function classifySportsMarketStructure(
   const question = s(market.question);
   const rawType = s((market as any).sportsMarketType).toLowerCase();
   const eventTitle = s(event.title) || null;
-  const text = [
+  const semanticText = [
     question,
     s(market.slug),
-    s(market.description),
     s((market as any).groupItemTitle),
     rawType,
     eventTitle,
     s(event.seriesSlug)
+  ].filter(Boolean).join(" ");
+  const text = [
+    semanticText,
+    s(market.description)
   ].filter(Boolean).join(" ");
 
   const sportsSignal =
     Boolean((market as any).gameId) ||
     Boolean((event as any).gameId) ||
     Boolean(rawType) ||
-    /\b(nfl|nba|wnba|mlb|nhl|soccer|football|basketball|baseball|hockey|tennis|ufc|mma|cricket|rugby|golf|esports|moneyline|spread|total points|total goals|total runs)\b/i.test(text);
+    /\b(nfl|nba|wnba|mlb|nhl|soccer|football|basketball|baseball|hockey|tennis|ufc|mma|cricket|rugby|golf|esports|moneyline|spread|total points|total goals|total runs|corners?)\b/i.test(semanticText) ||
+    (/\b(?:vs\.?|versus|v\.)\b/i.test(question) && /\b(?:o\/u|over\/under)\b/i.test(question));
 
   if (!sportsSignal) return null;
 
-  const scope = detectScope(text, rawType);
+  const scope = detectScope(semanticText, rawType);
   const numericText = [question, s((market as any).groupItemTitle)].filter(Boolean).join(" ");
   const comparator = detectComparator(numericText);
   const range = extractRange(numericText);
   const line = extractLine(market, numericText);
-  const stat = detectStat(text);
+  const stat = detectStat(semanticText);
   const teamTotalSubject=detectTeamTotalSubject(question,eventTitle);
 
   let kind: SportsMarketKind = "other_sports";
 
-  if (/exact score|correct score|final score/i.test(text)) {
+  if (/exact score|correct score|final score/i.test(semanticText)) {
     kind = "exact_score";
-  } else if (/both teams.*score|btts/i.test(text)) {
+  } else if (/both teams.*score|btts/i.test(semanticText)) {
     kind = "both_teams_score";
-  } else if (/first (?:goal|touchdown|basket|score|scorer)|to score first/i.test(text)) {
+  } else if (/first (?:goal|touchdown|basket|score|scorer)|to score first/i.test(semanticText)) {
     kind = "first_scorer";
-  } else if (/player prop|player.*(?:points|goals|rebounds|assists|yards|kills|shots|saves)|(?:points|goals|rebounds|assists|yards|kills|shots|saves).*player/i.test(text)) {
+  } else if (/player prop|player.*(?:points|goals|rebounds|assists|yards|kills|shots|saves)|(?:points|goals|rebounds|assists|yards|kills|shots|saves).*player/i.test(semanticText)) {
     kind = "player_prop";
-  } else if (/team total/i.test(text) || teamTotalSubject) {
+  } else if (/team total/i.test(semanticText) || teamTotalSubject) {
     kind = "team_total";
   } else if (
     rawType === "spreads" ||
@@ -260,25 +264,25 @@ export function classifySportsMarketStructure(
   ) {
     kind = "score_band";
   } else if (
-    /\bspread\b|handicap/i.test(text)
+    /\bspread\b|handicap/i.test(semanticText)
   ) {
     kind = scope === "full_game" || scope === "match" ? "spread" : "period_spread";
   } else if (
-    /\b(?:o\/u|over\/under)\b|\btotal (?:points|goals|runs|rounds|games|sets)\b|\bover \d|\bunder \d/i.test(text)
+    /\b(?:o\/u|over\/under)\b|\btotal (?:points|goals|runs|rounds|games|sets|corners)\b|\bover \d|\bunder \d/i.test(semanticText)
   ) {
     kind = scope === "full_game" || scope === "match" ? "game_total" : "period_total";
   } else if (
-    /\bmoneyline\b|\bmatch winner\b|\bgame winner\b/i.test(text)
+    /\bmoneyline\b|\bmatch winner\b|\bgame winner\b/i.test(semanticText)
   ) {
     kind = scope === "full_game" || scope === "match" ? "moneyline" : "period_moneyline";
-  } else if (/series winner|win the series|best of/i.test(text)) {
+  } else if (/series winner|win the series|best of/i.test(semanticText)) {
     kind = "series";
-  } else if (/championship|conference winner|division winner|season wins|mvp|award|win the league|win the tournament/i.test(text)) {
+  } else if (/championship|conference winner|division winner|season wins|mvp|award|win the league|win the tournament/i.test(semanticText)) {
     kind = "futures";
   } else if (
     comparator !== null &&
     line !== null &&
-    /points?|goals?|runs?|hits?|yards?|kills?|rounds?|sets?|games?/i.test(text)
+    /points?|goals?|runs?|hits?|yards?|kills?|rounds?|sets?|games?|corners?/i.test(semanticText)
   ) {
     kind = "threshold";
   } else if (
@@ -310,7 +314,7 @@ export function classifySportsMarketStructure(
   return {
     kind,
     scope,
-    sport: detectSport(text),
+    sport: detectSport(semanticText),
     rawSportsMarketType: rawType || null,
     eventTitle,
     subject: teamTotalSubject || detectSubject(market, question),
