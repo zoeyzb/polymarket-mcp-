@@ -117,6 +117,51 @@ describe("historical probability replay", () => {
     expect(result.holdoutDaily?.activeDays ?? 0).toBeGreaterThanOrEqual(5);
   });
 
+  it("reports the exact calendar fold and rule that rejected near-pass policies", () => {
+    const start = Date.UTC(2025,0,1);
+    const synthetic = Array.from({ length: 2400 }, (_, i) => {
+      const ts = start + i * 3 * 3600_000;
+      const day = Math.floor((ts - start) / 86_400_000);
+      const price = i % 2 === 0 ? 0.8 : 0.2;
+      const badWindow = day >= 210 && day < 240;
+      const actual = badWindow ? (price > 0.5 ? 0 : 1) : (price > 0.5 ? 1 : 0);
+      return {
+        conditionId:"cal-bad-"+String(i+1),
+        resolvedAt:new Date(ts).toISOString(),
+        domain:"sports",
+        actualOutcome0:actual as 0 | 1,
+        prices:{tMinus60m:price}
+      };
+    });
+    const result = runCalendarWalkForwardEdgeBacktest(synthetic,{
+      horizon:"tMinus60m",
+      bufferBps:0,
+      feeMode:"none",
+      minBinSamples:5,
+      calendarLookbackDays:120,
+      calendarFoldDays:30,
+      calendarHoldoutDays:30,
+      minFoldTrades:10,
+      minFoldRoiPct:0.1,
+      minFoldHitRatePct:95,
+      minFoldActiveDays:5,
+      minFoldProfitableDayPct:80,
+      minHoldoutTrades:20,
+      minHoldoutRoiPct:0.1,
+      minValidationHitRatePct:95,
+      minHoldoutActiveDays:5,
+      minHoldoutProfitableDayPct:80,
+      thresholds:[0.7,0.8],
+      minEdgesBps:[0,25]
+    });
+    expect(result.deployable).toBe(false);
+    expect(result.diagnostics?.rejectedPolicies ?? 0).toBeGreaterThan(0);
+    const failures = (result.diagnostics?.nearPassPolicies ?? [])
+      .flatMap(policy => policy.foldReports)
+      .flatMap(report => report.failures);
+    expect(failures.some(failure => failure === "min_roi" || failure === "min_hit_rate")).toBe(true);
+  });
+
   it("requires every walk-forward period to clear the profit floor before deployment", () => {
     const synthetic = Array.from({ length: 500 }, (_, i) => {
       const price = i % 2 === 0 ? 0.8 : 0.2;

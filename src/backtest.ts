@@ -587,7 +587,14 @@ export function runWalkForwardEdgeBacktest(
       folds:[],
       holdout:null,
       deployable:false,
-      reason:"insufficient_samples"
+      reason:"insufficient_samples",
+      diagnostics:{
+        evaluatedPolicies:0,
+        passingPolicies:0,
+        rejectedPolicies:0,
+        foldFailureCounts:{},
+        nearPassPolicies:[]
+      }
     };
   }
 
@@ -824,10 +831,56 @@ export function runCalendarWalkForwardEdgeBacktest(
     totalTrades:number;
     score:number;
   }> = [];
+  const rejectedCandidates:Array<{
+    threshold:number;
+    minEdgeBps:number;
+    passedFolds:number;
+    failedFolds:number;
+    foldReports:Array<{
+      fold:number;
+      startAt:string;
+      endAt:string;
+      trainingSamples:number;
+      validationSamples:number;
+      trades:number;
+      hitRatePct:number|null;
+      roiPct:number|null;
+      activeDays:number;
+      profitableDayPct:number|null;
+      failures:string[];
+    }>;
+  }> = [];
+
+  const foldFailureCounts:Record<string,number> = {};
+  const foldFailures = (slice: BacktestSlice, daily: DailyPnlSummary) => {
+    const failures:string[] = [];
+    if (slice.trades < minFoldTrades) failures.push("min_trades");
+    if (slice.roiPct === null || slice.roiPct < minFoldRoiPct) failures.push("min_roi");
+    if (slice.hitRatePct === null || slice.hitRatePct < minFoldHitRatePct) failures.push("min_hit_rate");
+    if (daily.activeDays < minFoldActiveDays) failures.push("min_active_days");
+    if (daily.profitableDayPct === null || daily.profitableDayPct < minFoldProfitableDayPct) {
+      failures.push("min_profitable_day_pct");
+    }
+    for (const failure of failures) foldFailureCounts[failure] = (foldFailureCounts[failure] || 0) + 1;
+    return failures;
+  };
 
   for (const threshold of thresholds) {
     for (const minEdgeBps of minEdgesBps) {
       const folds:Array<BacktestSlice & { daily: DailyPnlSummary }> = [];
+      const foldReports:Array<{
+        fold:number;
+        startAt:string;
+        endAt:string;
+        trainingSamples:number;
+        validationSamples:number;
+        trades:number;
+        hitRatePct:number|null;
+        roiPct:number|null;
+        activeDays:number;
+        profitableDayPct:number|null;
+        failures:string[];
+      }> = [];
       let valid = true;
 
       for (let fold=0; fold<foldCount; fold++) {
@@ -842,8 +895,26 @@ export function runCalendarWalkForwardEdgeBacktest(
         });
 
         if (trainingSamples.length < minBinSamples || foldSamples.length === 0) {
-          valid=false;
-          break;
+          valid = false;
+          const failures = [
+            ...(trainingSamples.length < minBinSamples ? ["insufficient_training_samples"] : []),
+            ...(foldSamples.length === 0 ? ["no_validation_samples"] : [])
+          ];
+          for (const failure of failures) foldFailureCounts[failure] = (foldFailureCounts[failure] || 0) + 1;
+          foldReports.push({
+            fold:fold + 1,
+            startAt:new Date(foldStartTs).toISOString(),
+            endAt:new Date(foldEndTs).toISOString(),
+            trainingSamples:trainingSamples.length,
+            validationSamples:foldSamples.length,
+            trades:0,
+            hitRatePct:null,
+            roiPct:null,
+            activeDays:0,
+            profitableDayPct:null,
+            failures
+          });
+          continue;
         }
 
         const calibration = buildCalibration(trainingSamples, options.horizon, threshold, binSize, minBinSamples);
@@ -865,22 +936,35 @@ export function runCalendarWalkForwardEdgeBacktest(
         });
         folds.push({...slice,daily});
 
-        if (
-          slice.trades < minFoldTrades ||
-          slice.roiPct === null ||
-          slice.roiPct < minFoldRoiPct ||
-          slice.hitRatePct === null ||
-          slice.hitRatePct < minFoldHitRatePct ||
-          daily.activeDays < minFoldActiveDays ||
-          daily.profitableDayPct === null ||
-          daily.profitableDayPct < minFoldProfitableDayPct
-        ) {
-          valid=false;
-          break;
-        }
+        const failures = foldFailures(slice,daily);
+        if (failures.length) valid=false;
+        foldReports.push({
+          fold:fold + 1,
+          startAt:new Date(foldStartTs).toISOString(),
+          endAt:new Date(foldEndTs).toISOString(),
+          trainingSamples:trainingSamples.length,
+          validationSamples:foldSamples.length,
+          trades:slice.trades,
+          hitRatePct:slice.hitRatePct,
+          roiPct:slice.roiPct,
+          activeDays:daily.activeDays,
+          profitableDayPct:daily.profitableDayPct,
+          failures
+        });
       }
 
-      if (!valid || folds.length !== foldCount) continue;
+      const failedFolds = foldReports.filter(report => report.failures.length > 0).length;
+      if (!valid || folds.length !== foldCount) {
+        rejectedCandidates.push({
+          threshold,
+          minEdgeBps,
+          passedFolds:foldReports.length - failedFolds,
+          failedFolds,
+          foldReports
+        });
+        continue;
+      }
+
       const rois=folds.map(f=>Number(f.roiPct||0));
       const minRoi=Math.min(...rois);
       const avgRoi=rois.reduce((a,b)=>a+b,0)/rois.length;
@@ -889,6 +973,20 @@ export function runCalendarWalkForwardEdgeBacktest(
       candidateResults.push({threshold,minEdgeBps,folds,minRoi,avgRoi,totalTrades,score});
     }
   }
+
+  rejectedCandidates.sort((a,b) => {
+    if (b.passedFolds !== a.passedFolds) return b.passedFolds - a.passedFolds;
+    const aMin = Math.min(...a.foldReports.map(r => r.roiPct ?? -999));
+    const bMin = Math.min(...b.foldReports.map(r => r.roiPct ?? -999));
+    return bMin - aMin;
+  });
+  const diagnostics = {
+    evaluatedPolicies: thresholds.length * minEdgesBps.length,
+    passingPolicies: candidateResults.length,
+    rejectedPolicies: rejectedCandidates.length,
+    foldFailureCounts,
+    nearPassPolicies: rejectedCandidates.slice(0,8)
+  };
 
   candidateResults.sort((a,b)=>b.score-a.score);
   const selected=candidateResults[0]||null;
@@ -904,6 +1002,7 @@ export function runCalendarWalkForwardEdgeBacktest(
       holdoutDaily:null,
       deployable:false,
       reason:"no_policy_passed_calendar_walk_forward",
+      diagnostics,
       requirements:{
         lookbackDays,foldDays,holdoutDays,foldCount,minFoldTrades,minFoldRoiPct,minFoldHitRatePct,
         minFoldActiveDays,minFoldProfitableDayPct,minHoldoutTrades,minHoldoutRoiPct,
@@ -965,6 +1064,7 @@ export function runCalendarWalkForwardEdgeBacktest(
     holdoutDaily,
     deployable,
     reason:deployable ? "calendar_walk_forward_and_daily_gate_pass" : "calendar_holdout_or_daily_gate_failed",
+    diagnostics,
     requirements:{
       lookbackDays,foldDays,holdoutDays,foldCount,minFoldTrades,minFoldRoiPct,minFoldHitRatePct,
       minFoldActiveDays,minFoldProfitableDayPct,minHoldoutTrades,minHoldoutRoiPct,
