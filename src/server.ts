@@ -178,6 +178,25 @@ function noteDbWorkerFailure(worker:string,error:unknown){
   return false;
 }
 
+async function runBestEffortDbTask<T>(worker:string,task:()=>Promise<T>):Promise<{ok:boolean;skipped:boolean;value?:T}>{
+  if(dbQuotaSkip(worker)) return {ok:false,skipped:true};
+  try{
+    const value=await task();
+    DB_QUOTA_BACKOFF.noteSuccess();
+    return {ok:true,skipped:false,value};
+  }catch(error){
+    if(noteDbWorkerFailure(worker,error)) return {ok:false,skipped:true};
+    console.error(JSON.stringify({
+      level:"error",
+      message:"db_task_failed",
+      worker,
+      error:errorMessage(error),
+      at:new Date().toISOString()
+    }));
+    return {ok:false,skipped:false};
+  }
+}
+
 
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -2906,28 +2925,11 @@ async function runBackgroundScan() {
       eventBaskets: []
     };
 
-    await persistMultiHorizonSnapshot(multi).catch(error => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "multi_horizon_snapshot_persistence_failed",
-        error: errorMessage(error),
-        at: new Date().toISOString()
-      }));
-    });
+    await runBestEffortDbTask("scanner_snapshot_persistence",()=>persistMultiHorizonSnapshot(multi));
 
     if (Date.now() - lastBroadPersistenceAt >= PERSIST_SCAN_SECONDS * 1000) {
-      await persistScan(broadScan)
-        .then(result => {
-          if ((result as any)?.ok !== false) lastBroadPersistenceAt = Date.now();
-        })
-        .catch(error => {
-          console.error(JSON.stringify({
-            level: "error",
-            message: "persistence_write_failed",
-            error: errorMessage(error),
-            at: new Date().toISOString()
-          }));
-        });
+      const result=await runBestEffortDbTask("scanner_broad_scan_persistence",()=>persistScan(broadScan));
+      if(result.ok && (result.value as any)?.ok !== false) lastBroadPersistenceAt=Date.now();
     }
 
     const alertCandidates = new Map<string, (typeof multi.lanes.broader24h.candidates)[number]>();
@@ -2938,19 +2940,12 @@ async function runBackgroundScan() {
       alertCandidates.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
     }
 
-    await persistAlertsFromScan({
+    await runBestEffortDbTask("scanner_alert_persistence",()=>persistAlertsFromScan({
       ...broadScan,
       candidates: [...alertCandidates.values()],
       returned: alertCandidates.size,
       eventBaskets: multi.structuralUniverse.eventBaskets
-    }).catch(error => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "alert_persistence_failed",
-        error: errorMessage(error),
-        at: new Date().toISOString()
-      }));
-    });
+    }));
 
     if (Date.now() - lastPacketPersistenceAt >= PERSIST_PACKET_SECONDS * 1000) {
       const packetCandidateMap = new Map<string, (typeof multi.lanes.broader24h.candidates)[number]>();
@@ -2966,19 +2961,14 @@ async function runBackgroundScan() {
         packetCandidateMap.set(candidate.conditionId || candidate.id || candidate.slug || candidate.question, candidate);
       }
 
-      await persistOpportunityPackets(
-        multi.generatedAt,
-        [...packetCandidateMap.values()].slice(0, PERSIST_PACKET_LIMIT)
-      ).then(() => {
-        lastPacketPersistenceAt = Date.now();
-      }).catch(error => {
-        console.error(JSON.stringify({
-          level: "error",
-          message: "opportunity_packet_persistence_failed",
-          error: errorMessage(error),
-          at: new Date().toISOString()
-        }));
-      });
+      const packetResult=await runBestEffortDbTask(
+        "scanner_opportunity_packet_persistence",
+        ()=>persistOpportunityPackets(
+          multi.generatedAt,
+          [...packetCandidateMap.values()].slice(0,PERSIST_PACKET_LIMIT)
+        )
+      );
+      if(packetResult.ok) lastPacketPersistenceAt=Date.now();
     }
 
     // Realtime subscriptions focus on <=6h markets plus any structural edge anywhere.
@@ -2989,11 +2979,11 @@ async function runBackgroundScan() {
       structuralBaskets:multi.structuralUniverse.eventBaskets,
       developing:multi.lanes.developing6h.candidates
     },REALTIME_TARGET_TOKEN_LIMIT);
-    await replaceRealtimeTargets(
+    await runBestEffortDbTask("scanner_realtime_target_persistence",()=>replaceRealtimeTargets(
       tokens,
       "multi_horizon_scanner",
-      Math.max(180, BACKGROUND_SCAN_SECONDS * 3)
-    );
+      Math.max(180,BACKGROUND_SCAN_SECONDS*3)
+    ));
 
     if (ROLE_STREAMS) {
       realtimeTracker.updateTokens(tokens);
