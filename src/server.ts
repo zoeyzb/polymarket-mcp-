@@ -152,6 +152,11 @@ async function getProductionStrategyPolicy(force = false) {
     return strategyPolicyCache.value;
   }
 
+  const calibrationSummary = await getHistoricalCalibrationSummary().catch(() => null) as any;
+  const calibrationComplete =
+    Number(calibrationSummary?.sampleCount || 0) > 0 &&
+    Number(calibrationSummary?.causalV2Remaining || 0) === 0;
+
   const domains = ["sports","crypto","weather","other"] as const;
   const replays = await Promise.all(domains.map(async domain => {
     const replay = await runHistoricalReplay({
@@ -172,11 +177,13 @@ async function getProductionStrategyPolicy(force = false) {
     const walk = replay.walkForward as any;
     const calendarWalk = replay.calendarWalkForward as any;
     const calibrated = replay.calibrated as any;
-    const enabled = calendarWalk?.deployable === true;
+    const enabled = calibrationComplete && calendarWalk?.deployable === true;
     perDomain[domain] = {
       enabled,
       sampleCount:replay.sampleCount,
-      reason:calendarWalk?.reason || "calendar_walk_forward_unavailable",
+      reason:!calibrationComplete
+        ? "causal_v2_rebuild_incomplete"
+        : calendarWalk?.reason || "calendar_walk_forward_unavailable",
       calendarWalkForward:{
         deployable:enabled,
         selectedPolicy:calendarWalk?.selectedPolicy ?? null,
@@ -207,6 +214,14 @@ async function getProductionStrategyPolicy(force = false) {
   const policy = {
     generatedAt:new Date().toISOString(),
     sampleCount:totalSamples,
+    calibration:{
+      version:HISTORICAL_CALIBRATION_VERSION,
+      complete:calibrationComplete,
+      progressPct:Number(calibrationSummary?.causalV2ProgressPct || 0),
+      remaining:Number(calibrationSummary?.causalV2Remaining || 0),
+      totalRows:Number(calibrationSummary?.sampleCount || 0),
+      causalRows:Number(calibrationSummary?.causalV2Samples || 0)
+    },
     structuralStrategiesEnabled:true,
     directionalProbabilityModelEnabled:enabledDomains.length > 0,
     directionalProbabilityModelScope:"domain_specific",
@@ -292,10 +307,12 @@ async function runHistoricalReplay(options: {
   const samples = await getHistoricalReplaySamples({
     years,
     domains: options.domains,
-    limit: 100000
+    limit: 100000,
+    calibrationVersion: HISTORICAL_CALIBRATION_VERSION
   });
   return {
     years,
+    calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
     sampleCount: samples.length,
     backtest: runProbabilityThresholdBacktest(samples, {
       horizon,
