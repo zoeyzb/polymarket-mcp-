@@ -390,6 +390,7 @@ export async function cleanupRawStreams(
     fiveMinuteBarRetentionHours?: number;
     crossVenueRetentionDays?: number;
     snapshotKeepCount?: number;
+    truncateRealtimeQuotes?: boolean;
   }
 ) {
   if (!pool) return { configured: false, reason: "not_configured" };
@@ -403,16 +404,27 @@ export async function cleanupRawStreams(
   const fiveMinuteHours = Math.max(6, Math.min(720, Number(options?.fiveMinuteBarRetentionHours ?? 48)));
   const crossVenueDays = Math.max(7, Math.min(180, Number(options?.crossVenueRetentionDays ?? 30)));
   const snapshotKeepCount = Math.max(2, Math.min(50, Number(options?.snapshotKeepCount ?? 10)));
+  const truncateRealtimeQuotes = options?.truncateRealtimeQuotes === true;
   const startedAt = new Date().toISOString();
 
   try {
     // Delete disposable/high-volume rows first. Logging the maintenance run after
     // reclamation prevents a full database from blocking the cleanup itself.
-    const quoteDelete = await pool.query(
-      `delete from polymarket_brain.realtime_quotes
-       where observed_at < now() - ($1 || ' hours')::interval`,
-      [quoteHours]
-    );
+    let deletedRealtimeQuotes = 0;
+    if (truncateRealtimeQuotes) {
+      const count = await pool.query(
+        `select count(*)::int as rows from polymarket_brain.realtime_quotes`
+      );
+      deletedRealtimeQuotes = Number(count.rows[0]?.rows || 0);
+      await pool.query(`truncate table polymarket_brain.realtime_quotes`);
+    } else {
+      const quoteDelete = await pool.query(
+        `delete from polymarket_brain.realtime_quotes
+         where observed_at < now() - ($1 || ' hours')::interval`,
+        [quoteHours]
+      );
+      deletedRealtimeQuotes = quoteDelete.rowCount ?? 0;
+    }
 
     const sportsDelete = await pool.query(
       `delete from polymarket_brain.sports_events
@@ -480,6 +492,7 @@ export async function cleanupRawStreams(
       startedAt,
       finishedAt: new Date().toISOString(),
       quoteRetentionHours: quoteHours,
+      truncateRealtimeQuotes,
       sportsRetentionDays: sportDays,
       candidateRetentionDays: candidateDays,
       scanRetentionDays: scanDays,
@@ -488,7 +501,7 @@ export async function cleanupRawStreams(
       fiveMinuteBarRetentionHours: fiveMinuteHours,
       crossVenueRetentionDays: crossVenueDays,
       snapshotKeepCount,
-      deletedRealtimeQuotes: quoteDelete.rowCount ?? 0,
+      deletedRealtimeQuotes,
       deletedSportsEvents: sportsDelete.rowCount ?? 0,
       deletedCandidates: candidateDelete.rowCount ?? 0,
       deletedEventBaskets: basketDelete.rowCount ?? 0,
@@ -544,7 +557,11 @@ export async function replaceRealtimeTargets(
 ) {
   if (!pool) return { configured: false, reason: "not_configured", targets: 0 };
 
-  const unique = [...new Set(tokenIds.filter(Boolean))].slice(0, 10000);
+  const hardTargetLimit = Math.max(
+    100,
+    Math.min(2000, Number(process.env.REALTIME_TARGET_TOKEN_LIMIT || 400))
+  );
+  const unique = [...new Set(tokenIds.filter(Boolean))].slice(0, hardTargetLimit);
   const client = await pool.connect();
   try {
     await client.query("begin");
