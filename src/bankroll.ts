@@ -129,8 +129,8 @@ export function simulateBankroll(
       const returned = position.stakeUsd * Math.max(0, Number(position.returnMultiple || 0));
       cash += returned;
       const pnl = returned - position.stakeUsd;
-      realizedBankroll += pnl;
       const day=ensureDay(position.settleAt);
+      realizedBankroll += pnl;
       dayPnl.set(day,(dayPnl.get(day)||0)+pnl);
       highWater=Math.max(highWater,realizedBankroll);
       if (highWater>0) worstDrawdown=Math.min(worstDrawdown,(realizedBankroll-highWater)/highWater);
