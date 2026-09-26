@@ -3305,7 +3305,7 @@ async function runEphemeralResearchPaperWorker() {
     });
 
   const confidenceRows=getEphemeralConfidenceStats("research_shadow_") as any[];
-  const familyRows=getEphemeralFamilyStats("research_shadow_") as any[];
+  const familyRows=getEphemeralFamilyStats(["research_shadow_","observation_sports_"]) as any[];
   const familyStats=new Map(familyRows.map(row=>[String(row.family),row]));
   const confidenceStates=new Map<ResearchConfidenceBand,{openTrades:number;openExposureUsd:number;availableCashUsd:number;realizedNetPnlUsd:number}>();
   for (const band of ["ultra_high","high","exploratory"] as ResearchConfidenceBand[]) {
