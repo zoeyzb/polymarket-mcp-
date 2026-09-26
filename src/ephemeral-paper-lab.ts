@@ -103,3 +103,31 @@ export function getEphemeralConfidenceStats(prefix="research_shadow_"){
     return {confidenceBand,...stats};
   });
 }
+
+
+export function getEphemeralFamilyStats(prefix="research_shadow_"){
+  const rows=prefix ? trades.filter(t=>t.strategyId.startsWith(prefix)) : [...trades];
+  const families=[...new Set(rows.map(t=>t.family).filter(Boolean))];
+  return families.map(family=>{
+    const familyRows=rows.filter(t=>t.family===family);
+    const resolved=familyRows.filter(t=>t.status==="WIN"||t.status==="LOSS");
+    const wins=resolved.filter(t=>t.status==="WIN").length;
+    const losses=resolved.filter(t=>t.status==="LOSS").length;
+    const open=familyRows.filter(t=>t.status==="OPEN");
+    const netPnlUsd=resolved.reduce((sum,t)=>sum+Number(t.netPnlUsd||0),0);
+    const resolvedStakeUsd=resolved.reduce((sum,t)=>sum+Number(t.stakeUsd||0),0);
+    return {
+      family,
+      trades:familyRows.length,
+      openTrades:open.length,
+      resolvedTrades:resolved.length,
+      wins,
+      losses,
+      openExposureUsd:Math.round(open.reduce((sum,t)=>sum+Number(t.stakeUsd||0),0)*1e6)/1e6,
+      netPnlUsd:Math.round(netPnlUsd*1e6)/1e6,
+      resolvedStakeUsd:Math.round(resolvedStakeUsd*1e6)/1e6,
+      winRatePct:resolved.length ? Math.round((wins/resolved.length)*100000)/1000 : null,
+      aggregateRoiPct:resolvedStakeUsd>0 ? Math.round((netPnlUsd/resolvedStakeUsd)*100000)/1000 : null
+    };
+  }).sort((a,b)=>b.resolvedTrades-a.resolvedTrades || Number(b.winRatePct||0)-Number(a.winRatePct||0));
+}

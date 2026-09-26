@@ -106,8 +106,8 @@ import { computePaperPortfolioState } from "./paper-portfolio.js";
 import { classifyResearchConfidenceBand, type ResearchConfidenceBand } from "./research-confidence.js";
 import { classifyMarketFamily, marketFamilyFromCandidate, type MarketFamily } from "./market-family.js";
 import { buildResearchCandidateUniverse } from "./research-universe.js";
-import { chooseChampionCandidate, championStakeUsd } from "./paper-champion.js";
-import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
+import { chooseChampionCandidate, chooseChampionPortfolio, championStakeUsd } from "./paper-champion.js";
+import { createEphemeralPaperTrade, getEphemeralOpenTrades, getEphemeralPaperStats, getEphemeralConfidenceStats, getEphemeralFamilyStats, settleEphemeralPaperTrade } from "./ephemeral-paper-lab.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const VERSION = "0.5.0";
@@ -3137,6 +3137,8 @@ async function runEphemeralResearchPaperWorker() {
     });
 
   const confidenceRows=getEphemeralConfidenceStats("research_shadow_") as any[];
+  const familyRows=getEphemeralFamilyStats("research_shadow_") as any[];
+  const familyStats=new Map(familyRows.map(row=>[String(row.family),row]));
   const confidenceStates=new Map<ResearchConfidenceBand,{openTrades:number;openExposureUsd:number;availableCashUsd:number;realizedNetPnlUsd:number}>();
   for (const band of ["ultra_high","high","exploratory"] as ResearchConfidenceBand[]) {
     const row=confidenceRows.find(item=>String(item.confidenceBand)===band) || {};
@@ -3186,11 +3188,15 @@ async function runEphemeralResearchPaperWorker() {
     if(!confidenceBand) { rejected.no_confidence_band=(rejected.no_confidence_band||0)+1; continue; }
 
     if(confidenceBand==="ultra_high" || confidenceBand==="high"){
+      const empirical=familyStats.get(family) as any;
       championChoices.push({
         id:`${candidate.conditionId}:${tokenId}`,
         domain,family,entryPrice,
         liquidityUsd:Number(candidate.liquidityUsd||0),
         minutesRemaining:Number(candidate.minutesRemaining||0),
+        empiricalResolvedTrades:Number(empirical?.resolvedTrades||0),
+        empiricalWinRatePct:empirical?.winRatePct==null ? null : Number(empirical.winRatePct),
+        empiricalRoiPct:empirical?.aggregateRoiPct==null ? null : Number(empirical.aggregateRoiPct),
         candidate,outcomeIndex,tokenId
       });
     }
@@ -3221,7 +3227,7 @@ async function runEphemeralResearchPaperWorker() {
     }
   }
 
-  let championDecision:any=null;
+  const championDecisions:any[]=[];
   if(CHAMPION_PAPER_ENABLED){
     const stats=getEphemeralPaperStats("champion_100_") as any;
     const portfolio=computePaperPortfolioState({
@@ -3229,47 +3235,61 @@ async function runEphemeralResearchPaperWorker() {
       realizedNetPnlUsd:Number(stats.netPnlUsd||0),
       openExposureUsd:Number(stats.openExposureUsd||0)
     });
-    const pick=chooseChampionCandidate(championChoices);
-    if(pick && Number(stats.openTrades||0)<CHAMPION_PAPER_MAX_OPEN_TRADES){
+    const openSlots=Math.max(0,CHAMPION_PAPER_MAX_OPEN_TRADES-Number(stats.openTrades||0));
+    const picks=chooseChampionPortfolio(championChoices,{
+      maxPicks:openSlots || 1,
+      maxPerFamily:2,
+      minEmpiricalSamples:20,
+      minEmpiricalWinRatePct:95
+    });
+    let availableCash=portfolio.availableCashUsd;
+
+    for(const pick of picks.slice(0,openSlots)){
       const choice=championChoices.find(item=>item.id===pick.id);
       const stake=championStakeUsd({
         currentBankrollUsd:portfolio.currentBankrollUsd,
-        availableCashUsd:portfolio.availableCashUsd,
+        availableCashUsd:availableCash,
         maxStakeUsd:CHAMPION_PAPER_MAX_STAKE_USD
       });
-      if(choice && stake>0){
-        const result=createEphemeralPaperTrade({
-          strategyId:`champion_100_${choice.domain}_${choice.family}`,
-          conditionId:String(choice.candidate.conditionId),
-          tokenId:String(choice.tokenId),
-          slug:String(choice.candidate.slug),
-          question:String(choice.candidate.question||""),
-          domain:choice.domain,
-          family:choice.family,
-          outcome:String(choice.candidate.outcomes[choice.outcomeIndex]||""),
-          entryPrice:choice.entryPrice,
-          stakeUsd:stake,
-          expectedResolutionAt:choice.candidate.endDate || null
-        });
-        championDecision={
-          inserted:result.inserted,
-          conditionId:choice.candidate.conditionId,
-          question:choice.candidate.question,
-          outcome:choice.candidate.outcomes[choice.outcomeIndex],
-          domain:choice.domain,
-          family:choice.family,
-          entryPrice:choice.entryPrice,
-          stakeUsd:stake
-        };
-      }
+      if(!choice || !(stake>0)) continue;
+
+      const result=createEphemeralPaperTrade({
+        strategyId:`champion_100_${choice.domain}_${choice.family}`,
+        conditionId:String(choice.candidate.conditionId),
+        tokenId:String(choice.tokenId),
+        slug:String(choice.candidate.slug),
+        question:String(choice.candidate.question||""),
+        domain:choice.domain,
+        family:choice.family,
+        outcome:String(choice.candidate.outcomes[choice.outcomeIndex]||""),
+        entryPrice:choice.entryPrice,
+        stakeUsd:stake,
+        expectedResolutionAt:choice.candidate.endDate || null
+      });
+      if(result.inserted) availableCash=Math.max(0,availableCash-stake);
+      championDecisions.push({
+        inserted:result.inserted,
+        conditionId:choice.candidate.conditionId,
+        question:choice.candidate.question,
+        outcome:choice.candidate.outcomes[choice.outcomeIndex],
+        domain:choice.domain,
+        family:choice.family,
+        entryPrice:choice.entryPrice,
+        stakeUsd:stake,
+        empiricalResolvedTrades:choice.empiricalResolvedTrades,
+        empiricalWinRatePct:choice.empiricalWinRatePct,
+        empiricalRoiPct:choice.empiricalRoiPct
+      });
     }
     console.log(JSON.stringify({
       level:"info",
       message:"ephemeral_champion_100_entry",
       storage:"memory_only",
-      decision:championDecision,
+      decisions:championDecisions,
       portfolioBefore:portfolio,
+      openSlots,
       candidateCount:championChoices.length,
+      familyStats:Object.fromEntries([...familyStats.entries()]),
       at:new Date().toISOString()
     }));
   }
