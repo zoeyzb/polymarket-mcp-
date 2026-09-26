@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
 type EphemeralStatus="OPEN"|"WIN"|"LOSS";
 
 export interface EphemeralPaperTradeInput {
@@ -26,10 +29,122 @@ interface EphemeralPaperTrade extends EphemeralPaperTradeInput {
 
 let nextId=1;
 let trades:EphemeralPaperTrade[]=[];
+let persistencePath:string|null=null;
+let persistenceLoadedAt:string|null=null;
+let persistenceLastWriteAt:string|null=null;
+let persistenceLastError:string|null=null;
+
+function errorText(error:unknown){
+  return error instanceof Error ? error.message : String(error);
+}
+
+function validTrade(value:any): value is EphemeralPaperTrade {
+  return Boolean(
+    value &&
+    Number.isFinite(Number(value.id)) &&
+    typeof value.strategyId==="string" &&
+    typeof value.conditionId==="string" &&
+    typeof value.tokenId==="string" &&
+    typeof value.slug==="string" &&
+    typeof value.question==="string" &&
+    typeof value.domain==="string" &&
+    typeof value.family==="string" &&
+    typeof value.outcome==="string" &&
+    Number.isFinite(Number(value.entryPrice)) &&
+    Number.isFinite(Number(value.stakeUsd)) &&
+    typeof value.entryAt==="string" &&
+    ["OPEN","WIN","LOSS"].includes(String(value.status))
+  );
+}
+
+function persistEphemeralPaperState(){
+  if(!persistencePath) return {configured:false,written:false};
+  const tempPath=`${persistencePath}.${process.pid}.tmp`;
+  try{
+    mkdirSync(dirname(persistencePath),{recursive:true});
+    const payload={
+      version:1,
+      writtenAt:new Date().toISOString(),
+      nextId,
+      trades
+    };
+    writeFileSync(tempPath,JSON.stringify(payload),"utf8");
+    renameSync(tempPath,persistencePath);
+    persistenceLastWriteAt=payload.writtenAt;
+    persistenceLastError=null;
+    return {configured:true,written:true,at:payload.writtenAt};
+  }catch(error){
+    persistenceLastError=errorText(error);
+    try{ if(existsSync(tempPath)) unlinkSync(tempPath); }catch{}
+    return {configured:true,written:false,error:persistenceLastError};
+  }
+}
+
+export function configureEphemeralPaperPersistence(filePath:string|null){
+  const nextPath=String(filePath||"").trim();
+  persistencePath=nextPath || null;
+  persistenceLoadedAt=null;
+  persistenceLastWriteAt=null;
+  persistenceLastError=null;
+
+  if(!persistencePath){
+    return {configured:false,loadedTrades:0};
+  }
+
+  try{
+    mkdirSync(dirname(persistencePath),{recursive:true});
+    if(!existsSync(persistencePath)){
+      return {configured:true,loadedTrades:0,filePath:persistencePath};
+    }
+    const parsed=JSON.parse(readFileSync(persistencePath,"utf8"));
+    const loaded=Array.isArray(parsed?.trades) ? parsed.trades.filter(validTrade) : [];
+    trades=loaded.map((trade:any)=>({
+      ...trade,
+      id:Number(trade.id),
+      entryPrice:Number(trade.entryPrice),
+      stakeUsd:Number(trade.stakeUsd),
+      netPnlUsd:trade.netPnlUsd==null ? null : Number(trade.netPnlUsd),
+      realizedRoiPct:trade.realizedRoiPct==null ? null : Number(trade.realizedRoiPct),
+      resolvedAt:trade.resolvedAt ?? null,
+      winningOutcome:trade.winningOutcome ?? null,
+      expectedResolutionAt:trade.expectedResolutionAt ?? null
+    }));
+    const maxId=trades.reduce((max,trade)=>Math.max(max,Number(trade.id)||0),0);
+    nextId=Math.max(maxId+1,Number(parsed?.nextId)||1);
+    persistenceLoadedAt=new Date().toISOString();
+    return {
+      configured:true,
+      loadedTrades:trades.length,
+      filePath:persistencePath,
+      loadedAt:persistenceLoadedAt
+    };
+  }catch(error){
+    persistenceLastError=errorText(error);
+    return {
+      configured:true,
+      loadedTrades:0,
+      filePath:persistencePath,
+      error:persistenceLastError
+    };
+  }
+}
+
+export function getEphemeralPaperPersistenceStatus(){
+  return {
+    configured:Boolean(persistencePath),
+    filePath:persistencePath,
+    loadedAt:persistenceLoadedAt,
+    lastWriteAt:persistenceLastWriteAt,
+    lastError:persistenceLastError,
+    trades:trades.length,
+    openTrades:trades.filter(trade=>trade.status==="OPEN").length
+  };
+}
 
 export function resetEphemeralPaperLab(){
   nextId=1;
   trades=[];
+  persistEphemeralPaperState();
 }
 
 export function createEphemeralPaperTrade(input:EphemeralPaperTradeInput){
@@ -50,6 +165,7 @@ export function createEphemeralPaperTrade(input:EphemeralPaperTradeInput){
     realizedRoiPct:null
   };
   trades.push(trade);
+  persistEphemeralPaperState();
   return {configured:true,inserted:true,id:trade.id};
 }
 
@@ -79,6 +195,7 @@ export function settleEphemeralPaperTrade(input:{id:number;won:boolean;winningOu
   trade.winningOutcome=input.winningOutcome;
   trade.netPnlUsd=Math.round(net*1e6)/1e6;
   trade.realizedRoiPct=trade.stakeUsd>0 ? Math.round((net/trade.stakeUsd)*100000)/1000 : 0;
+  persistEphemeralPaperState();
   return {updated:true,trade};
 }
 
