@@ -10,17 +10,23 @@ describe("paper champion selection", () => {
     expect(pick?.id).toBe("sports");
   });
 
-  it("prefers higher confidence within sports", () => {
+  it("prefers high-confidence growth efficiency over a nearly maxed-out 98.5 cent contract", () => {
     const pick=chooseChampionCandidate([
-      {id:"a",domain:"sports",family:"sports_total",entryPrice:0.84,liquidityUsd:5000,minutesRemaining:20},
-      {id:"b",domain:"sports",family:"sports_player_prop",entryPrice:0.94,liquidityUsd:400,minutesRemaining:100}
+      {id:"tiny-upside",domain:"sports",family:"sports_total",entryPrice:0.985,liquidityUsd:5000,minutesRemaining:20},
+      {id:"balanced",domain:"sports",family:"sports_player_prop",entryPrice:0.93,liquidityUsd:400,minutesRemaining:100}
     ]);
-    expect(pick?.id).toBe("b");
+    expect(pick?.id).toBe("balanced");
   });
 
   it("does not select exploratory candidates below 80 percent implied probability", () => {
     expect(chooseChampionCandidate([
       {id:"a",domain:"sports",family:"sports_total",entryPrice:0.79,liquidityUsd:5000,minutesRemaining:20}
+    ])).toBeNull();
+  });
+
+  it("does not select champion candidates above the 97 cent growth ceiling", () => {
+    expect(chooseChampionCandidate([
+      {id:"a",domain:"sports",family:"sports_total",entryPrice:0.985,liquidityUsd:5000,minutesRemaining:20}
     ])).toBeNull();
   });
 
