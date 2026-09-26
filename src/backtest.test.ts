@@ -155,8 +155,8 @@ describe("historical probability replay", () => {
       minEdgesBps:[0,25]
     });
     expect(result.deployable).toBe(false);
-    expect(result.diagnostics.rejectedPolicies).toBeGreaterThan(0);
-    const failures = result.diagnostics.nearPassPolicies
+    expect(result.diagnostics?.rejectedPolicies ?? 0).toBeGreaterThan(0);
+    const failures = (result.diagnostics?.nearPassPolicies ?? [])
       .flatMap(policy => policy.foldReports)
       .flatMap(report => report.failures);
     expect(failures.some(failure => failure === "min_roi" || failure === "min_hit_rate")).toBe(true);
