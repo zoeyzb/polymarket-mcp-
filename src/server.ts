@@ -2075,6 +2075,12 @@ const WALLET_INTELLIGENCE_LIMIT = Math.max(5, Math.min(100, Number(process.env.W
 const MAINTENANCE_SECONDS = Math.max(3600, Number(process.env.MAINTENANCE_SECONDS || 3600));
 const RAW_QUOTE_RETENTION_HOURS = Math.max(24, Number(process.env.RAW_QUOTE_RETENTION_HOURS || 72));
 const SPORTS_EVENT_RETENTION_DAYS = Math.max(7, Number(process.env.SPORTS_EVENT_RETENTION_DAYS || 30));
+const CANDIDATE_RETENTION_DAYS = Math.max(3, Number(process.env.CANDIDATE_RETENTION_DAYS || 14));
+const SCAN_RETENTION_DAYS = Math.max(3, Number(process.env.SCAN_RETENTION_DAYS || 14));
+const OPPORTUNITY_PACKET_RETENTION_DAYS = Math.max(7, Number(process.env.OPPORTUNITY_PACKET_RETENTION_DAYS || 30));
+const QUOTE_BAR_1M_RETENTION_DAYS = Math.max(3, Number(process.env.QUOTE_BAR_1M_RETENTION_DAYS || 21));
+const CROSS_VENUE_RETENTION_DAYS = Math.max(7, Number(process.env.CROSS_VENUE_RETENTION_DAYS || 30));
+const SNAPSHOT_KEEP_COUNT = Math.max(2, Number(process.env.SNAPSHOT_KEEP_COUNT || 10));
 
 let lastBroadPersistenceAt = 0;
 let lastPacketPersistenceAt = 0;
@@ -2337,7 +2343,15 @@ async function runMaintenanceWorker() {
   try {
     const result = await cleanupRawStreams(
       RAW_QUOTE_RETENTION_HOURS,
-      SPORTS_EVENT_RETENTION_DAYS
+      SPORTS_EVENT_RETENTION_DAYS,
+      {
+        candidateRetentionDays: CANDIDATE_RETENTION_DAYS,
+        scanRetentionDays: SCAN_RETENTION_DAYS,
+        packetRetentionDays: OPPORTUNITY_PACKET_RETENTION_DAYS,
+        oneMinuteBarRetentionDays: QUOTE_BAR_1M_RETENTION_DAYS,
+        crossVenueRetentionDays: CROSS_VENUE_RETENTION_DAYS,
+        snapshotKeepCount: SNAPSHOT_KEEP_COUNT
+      }
     );
     console.log(JSON.stringify({
       level: "info",
