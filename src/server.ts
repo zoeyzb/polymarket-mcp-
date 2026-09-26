@@ -37,6 +37,7 @@ import {
   getQuoteBars,
   getMaintenanceStats,
   getKnownHistoricalCalibrationIds,
+  getStaleHistoricalCalibrationRefs,
   getPersistenceIntegrity,
   getStorageHealth,
   getPersistentStats,
@@ -1841,6 +1842,16 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
     return true;
   }
 
+  if (url.pathname === "/api/calibration-health") {
+    const summary = await getHistoricalCalibrationSummary();
+    json(res, 200, {
+      ...summary,
+      calibrationVersion: HISTORICAL_CALIBRATION_VERSION,
+      complete: Number((summary as any)?.causalV2Remaining || 0) === 0
+    });
+    return true;
+  }
+
   if (url.pathname === "/api/strategy-policy") {
     json(res, 200, await getProductionStrategyPolicy(url.searchParams.get("force") === "true"));
     return true;
@@ -1925,6 +1936,7 @@ async function handleRest(req: IncomingMessage, res: ServerResponse, url: URL): 
       dashboard: "/dashboard",
       unifiedOpportunities: "/api/unified-opportunities?lane=urgent_2h&limit=50",
       strategyPolicy: "/api/strategy-policy",
+      calibrationHealth: "/api/calibration-health",
       historicalReplay: "/api/historical-replay?years=3&horizon=tMinus60m&threshold=0.75",
       opportunities: "/api/opportunities?minutes=120&limit=50",
       multiHorizon: "/api/multi-horizon?limitPerLane=100&structuralLimit=200",
@@ -2407,6 +2419,62 @@ async function runHistoricalBackfillWorker() {
     }
 
     const needsRecalibration = sampleCount > causalV2Samples;
+
+    if (needsRecalibration) {
+      let directStored = 0;
+      let directSkipped = 0;
+      let directChecked = 0;
+      while (Date.now() - runStarted < budgetMs) {
+        const stale = await getStaleHistoricalCalibrationRefs(
+          Math.max(HISTORICAL_BACKFILL_LIMIT, 500),
+          HISTORICAL_CALIBRATION_VERSION
+        );
+        if (!stale.length) break;
+        directChecked += stale.length;
+
+        for (let i = 0; i < stale.length && Date.now() - runStarted < budgetMs; i += 6) {
+          const batch = stale.slice(i, i + 6);
+          const samples = await Promise.all(batch.map(async ref => {
+            try {
+              const market = await getMarketBySlug(String(ref.slug || ""));
+              if (!market) return null;
+              return await buildHistoricalCalibrationSample(market);
+            } catch {
+              return null;
+            }
+          }));
+          for (const sample of samples) {
+            if (!sample) { directSkipped += 1; continue; }
+            await upsertHistoricalCalibrationSample(sample);
+            directStored += 1;
+          }
+        }
+
+        // If the queue head is entirely unbuildable, stop this direct pass so
+        // the worker can fall back to date-window discovery instead of spinning.
+        if (directStored === 0 && directSkipped >= stale.length) break;
+      }
+
+      const refreshed = await getHistoricalCalibrationSummary().catch(() => null) as any;
+      const remaining = Number(refreshed?.causalV2Remaining || 0);
+      console.log(JSON.stringify({
+        level:"info",
+        message:"historical_causal_v2_recalibration",
+        calibrationVersion:HISTORICAL_CALIBRATION_VERSION,
+        checked:directChecked,
+        stored:directStored,
+        skipped:directSkipped,
+        causalV2Samples:Number(refreshed?.causalV2Samples || causalV2Samples),
+        sampleCount:Number(refreshed?.sampleCount || sampleCount),
+        remaining,
+        progressPct:Number(refreshed?.causalV2ProgressPct || 0),
+        runtimeSeconds:Number(((Date.now()-runStarted)/1000).toFixed(1)),
+        at:new Date().toISOString()
+      }));
+
+      if (remaining === 0 || Date.now() - runStarted >= budgetMs) return;
+    }
+
     let cursorEnd = needsRecalibration
       ? new Date()
       : summary?.firstResolvedAt
